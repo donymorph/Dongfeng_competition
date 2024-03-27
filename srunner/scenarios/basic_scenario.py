@@ -60,7 +60,7 @@ class BasicScenario(object):
         if not self.route_mode:
             # Only init env for route mode, avoid duplicate initialization during runtime
             self._initialize_environment(world)
-
+            
         self._initialize_actors(config)
 
         if CarlaDataProvider.is_runtime_init_mode():
@@ -81,9 +81,8 @@ class BasicScenario(object):
             self.behavior_tree.add_child(trigger_behavior)
 
         scenario_behavior = self._create_behavior()
-        if scenario_behavior is not None:
-            self.behavior_tree.add_child(scenario_behavior)
-            self.behavior_tree.name = scenario_behavior.name
+        self.behavior_tree.add_child(scenario_behavior)
+        self.behavior_tree.name = scenario_behavior.name
 
         end_behavior = self._setup_scenario_end(config)
         if end_behavior:
@@ -283,7 +282,7 @@ class BasicScenario(object):
         more_nodes_exist = True
         while more_nodes_exist:
             more_nodes_exist = False
-            for node in list(node_list):
+            for node in node_list:
                 if node.children:
                     node_list.remove(node)
                     more_nodes_exist = True

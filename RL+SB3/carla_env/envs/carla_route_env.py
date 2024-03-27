@@ -71,24 +71,24 @@ class CarlaRouteEnv(gym.Env):
         """
 
         self.carla_process = None
-        if start_carla:
-            if "CARLA_ROOT" not in os.environ:
-                raise Exception("${CARLA_ROOT} has not been set!")
-            carla_path = os.path.join(os.environ["CARLA_ROOT"], "CarlaUE4.sh")
-            launch_command = [carla_path]
-            launch_command += ['-quality_level=Low']
-            launch_command += ['-benchmark']
-            launch_command += ["-fps=%i" % fps]
-            launch_command += ['-RenderOffScreen']
-            launch_command += ['-prefernvidia']
-            launch_command += [f'-carla-world-port={port}']
-            print("Running command:")
-            print(" ".join(launch_command))
-            self.carla_process = subprocess.Popen(launch_command, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
-            print("Waiting for CARLA to initialize\n")
+        # if start_carla:
+        #     if "CARLA_ROOT" not in os.environ:
+        #         raise Exception("${CARLA_ROOT} has not been set!")
+        #     carla_path = os.path.join(os.environ["CARLA_ROOT"], "CarlaUE4.sh")
+        #     launch_command = [carla_path]
+        #     launch_command += ['-quality_level=Low']
+        #     launch_command += ['-benchmark']
+        #     launch_command += ["-fps=%i" % fps]
+        #     launch_command += ['-RenderOffScreen']
+        #     launch_command += ['-prefernvidia']
+        #     launch_command += [f'-carla-world-port={port}']
+        #     print("Running command:")
+        #     print(" ".join(launch_command))
+        #     self.carla_process = subprocess.Popen(launch_command, stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
+        #     print("Waiting for CARLA to initialize\n")
 
-            # ./CarlaUE4.sh -quality_level=Low -benchmark -fps=15 -RenderOffScreen
-            time.sleep(5)
+        #     # ./CarlaUE4.sh -quality_level=Low -benchmark -fps=15 -RenderOffScreen
+        #     time.sleep(5)
 
         width, height = viewer_res
         if obs_res is None:

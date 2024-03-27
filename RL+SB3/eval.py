@@ -128,7 +128,7 @@ if __name__ == "__main__":
     if CONFIG["algorithm"] not in algorithm_dict:
         raise ValueError("Invalid algorithm name")
 
-    vae = load_vae(f'./vae/log_dir/{CONFIG["vae_model"]}', LSIZE)
+    vae = load_vae(f'./RL+SB3/vae/log_dir/{CONFIG["vae_model"]}', LSIZE)
     observation_space, encode_state_fn, decode_vae_fn = create_encode_state_fn(vae, CONFIG["state"])
 
     env = CarlaRouteEnv(obs_res=CONFIG["obs_res"], viewer_res=(1120, 560), host=args["host"], port=args["port"],
