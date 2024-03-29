@@ -25,7 +25,7 @@
 <!-- PROJECT LOGO -->
 <br />
 <div align="center">
-  <a href="https://github.com/github_username/repo_name">
+  <a href="https://github.com/donymorph/Dongfeng_competition">
     <img src="assets/logo.png" alt="Logo" width="100" height="100">
   </a>
 
@@ -99,9 +99,12 @@ Clone the repo, setup CARLA 0.9.14 or 0.9.15, and build the conda environment:
   ```
 
 ### Pre-Trained Models
-
-1. Download the pretened models for imitation learning [here](https://s3.eu-central-1.amazonaws.com/avg-projects-2/jaeger2023arxiv/models/pretrained_models.zip).
-2. Unzip and put them in the imitation learning folder
+#### CARLA_GARAGE
+1. Download the pretened models for Carla garage [here](https://s3.eu-central-1.amazonaws.com/avg-projects-2/jaeger2023arxiv/models/pretrained_models.zip).
+2. Unzip and put them in the imitation_learning/carla_garage folder
+#### Interfuser 
+1. Download the pretrained model for Interfuser [here](http://43.159.60.142/s/p2CN)
+2. put it in the imitation_learning/Interfuser folder no need to uzip
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
@@ -122,11 +125,15 @@ Clone the repo, setup CARLA 0.9.14 or 0.9.15, and build the conda environment:
     ```
     usage: eval.py [-h] [--host HOST] [--port PORT] --model MODEL [--no_render] [--fps FPS] [--no_record_video] [--config CONFIG]
     ```
-4. Test [imitation learning](https://github.com/donymorph/Dongfeng_competition/tree/main/imitation_learning) Trained models with [Carla leaderboard 2](https://leaderboard.carla.org/get_started/) 
+4. Evaluate [Carla garage](https://github.com/donymorph/Dongfeng_competition/tree/main/imitation_learning/carla_garage) Trained models with [Carla leaderboard 2](https://leaderboard.carla.org/get_started/) 
     ```
     python leaderboard/leaderboard_evaluator.py --agent imitation_learning/sensor_agent.py --routes routes/routes_town10.xml --agent-config pretened_models/leaderboard/ttpp_wp_all_0
     ```
-    it takes the following arguments 
+5. Evaluate [Interfuser](https://github.com/donymorph/Dongfeng_competition/tree/main/imitation_learning/interfuser) Trained model with [Carla leaderboard 2](https://leaderboard.carla.org/get_started/)
+    ```
+    python leaderboard/leaderboard_evaluator.py -a imitation_learning/interfuser/interfuser_agent.py --agent-config imitation_learning/interfuser/interfuser_config.py --routes routes/routes_town10.xml
+    ```
+    [leaderboard_evaluator.py](https://github.com/donymorph/Dongfeng_competition/tree/main/leaderboard/leaderboard_evaluator.py) takes the following arguments 
     ```
     usage: leaderboard_evaluator.py [-h] [--host HOST] [--port PORT] [--traffic-manager-port TRAFFIC_MANAGER_PORT] [--traffic-manager-seed TRAFFIC_MANAGER_SEED] [--debug DEBUG] [--record RECORD]
     [--timeout TIMEOUT] --routes ROUTES [--routes-subset ROUTES_SUBSET] [--repetitions REPETITIONS] -a AGENT [--agent-config AGENT_CONFIG] [--track TRACK] [--resume RESUME] [--checkpoint CHECKPOINT] [--debug-checkpoint DEBUG_CHECKPOINT]
