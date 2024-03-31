@@ -105,7 +105,12 @@ Clone the repo, setup CARLA 0.9.14 or 0.9.15, and build the conda environment:
 #### Interfuser 
 1. Download the pretrained model for Interfuser [here](http://43.159.60.142/s/p2CN)
 2. put it in the imitation_learning/Interfuser folder no need to uzip
-
+#### TCP 
+1. Download the pretrained model for TCP here [here](https://drive.google.com/file/d/1DaDCrSE6_SmpKa1bkrb3cOXxcnnHGQ8P/view?usp=sharing)
+2. put it in the imitation_learning/TCP folder uzip it
+#### Transfuser 
+1. Download the pretrained model for Interfuser here [here](https://s3.eu-central-1.amazonaws.com/avg-projects/transfuser/models_2022.zip)
+2. put it in the imitation_learning/Interfuser folder uzip it
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
 
@@ -132,6 +137,14 @@ Clone the repo, setup CARLA 0.9.14 or 0.9.15, and build the conda environment:
 5. Evaluate [Interfuser](https://github.com/donymorph/Dongfeng_competition/tree/main/imitation_learning/interfuser) Trained model with [Carla leaderboard 2](https://leaderboard.carla.org/get_started/)
     ```
     python leaderboard/leaderboard_evaluator.py -a imitation_learning/interfuser/interfuser_agent.py --agent-config imitation_learning/interfuser/interfuser_config.py --routes routes/routes_town10.xml
+    ```
+6. Evaluate [TCP](https://github.com/donymorph/Dongfeng_competition/tree/main/imitation_learning/TCP) Trained model with [Carla leaderboard 2](https://leaderboard.carla.org/get_started/)
+    ```
+    python leaderboard/leaderboard_evaluator.py -a imitation_learning/TCP/tcp_agent.py --agent-config imitation_learning/TCP/new.ckpt --routes routes/routes_town10.xml
+    ```
+7. Evaluate [Transfuser](https://github.com/donymorph/Dongfeng_competition/tree/main/imitation_learning/transfuser) Trained model with [Carla leaderboard 2](https://leaderboard.carla.org/get_started/) || not working mmcv and mmdet conflicts
+    ```
+    python leaderboard/leaderboard_evaluator.py -a imitation_learning/transfuser/submission_agent.py --agent-config imitation_learning/transfuser/transfuser --routes routes/routes_town10.xml
     ```
     [leaderboard_evaluator.py](https://github.com/donymorph/Dongfeng_competition/tree/main/leaderboard/leaderboard_evaluator.py) takes the following arguments 
     ```
@@ -179,6 +192,9 @@ wechatID - donyuzbguy
 * [Carla](https://github.com/carla-simulator/carla)
 * [Stabe-Baseline3](https://stable-baselines3.readthedocs.io/en/master/)
 * [Carla-garage](https://github.com/autonomousvision/carla_garage/tree/main)
+* [Interfuser](https://github.com/opendilab/InterFuser)
+* [Transfuser](https://github.com/autonomousvision/transfuser)
+* [TCP](https://github.com/OpenDriveLab/TCP)
 * [CARLA-SB3-RL-Training-Environment](https://github.com/alberto-mate/CARLA-SB3-RL-Training-Environment)
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>

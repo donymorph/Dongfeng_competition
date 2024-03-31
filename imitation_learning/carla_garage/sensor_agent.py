@@ -73,7 +73,7 @@ class SensorAgent(autonomous_agent.AutonomousAgent):
     # For models supporting different output modalities we select which one to use here.
     # 0: Waypoints
     # 1: Path + Target Speed
-    direct = os.environ.get('DIRECT', 1)
+    direct = os.environ.get('DIRECT', 0)
     self.uncertainty_weight = int(os.environ.get('UNCERTAINTY_WEIGHT', 1))
     print('Uncertainty weighting?: ', self.uncertainty_weight)
     if direct is not None:
