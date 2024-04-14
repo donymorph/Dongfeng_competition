@@ -1,0 +1,33 @@
+<routes>
+   <route id="0" town="Town10HD_Opt">
+      <!-- <weathers>
+         <weather route_percentage="0"
+            cloudiness="5.0" precipitation="0.0" precipitation_deposits="0.0" wetness="0.0"
+            wind_intensity="10.0" sun_azimuth_angle="-1.0" sun_altitude_angle="90.0" fog_density="2.0"/>
+         <weather route_percentage="100"
+            cloudiness="5.0" precipitation="0.0" precipitation_deposits="0.0" wetness="0.0"
+            wind_intensity="10.0" sun_azimuth_angle="-1.0" sun_altitude_angle="15.0" fog_density="2.0"/>
+      </weathers>
+      <waypoints>
+         <position x="-41.6" y="114.7" z="0.0"/>
+         <position x="27.7" y="70.1" z="0.0"/>
+         <position x="69.5" y="25.0" z="0.0"/>
+         <position x="0.5" y="-64.4" z="0.0"/>
+         <position x="-104.1" y="74.5" z="0.0"/>
+         <position x="-45.3" y="-24.1" z="0.0"/>
+         <position x="-114.6" y="67.9" z="0.0"/>
+      </waypoints> -->
+      <waypoints>
+         <position x="-41.6" y="114.7" z="0.0"/>
+         <position x="27.7" y="70.1" z="0.0"/>
+         <position x="69.5" y="25.0" z="0.0"/>
+         <position x="0.5" y="-64.4" z="0.0"/>
+         <position x="-104.1" y="74.5" z="0.0"/>
+         <position x="-45.3" y="-24.1" z="0.0"/>
+         <position x="-114.6" y="67.9" z="0.0"/>
+      </waypoints>
+      <scenarios>
+         
+      </scenarios>
+   </route>
+</routes>

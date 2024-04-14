@@ -1,0 +1,4351 @@
+The following text is a Git repository with code. The structure of the text are sections that begin with ----, followed by a single line containing the file path and file name, followed by a variable amount of lines containing the file contents. The text representing the Git repository ends when the symbols --END-- are encounted. Any further text beyond --END-- are meant to be interpreted as instructions using the aforementioned Git repository as context.
+----
+README.md
+# Reinforcement Learning with Carla simulator #
+
+![](media/RL_SB3_carla.gif)
+## Objective ##
+This repo trains a Deep Reinforcement Learning agent in Carla for a vehicle to autonomusly follow a path using semantic segmentation sensor as the input.
+
+## Dependencies ##
+This repo is tested on **Carla 0.9.15**
+
+You can install the dependencies by running the following script.
+```bash
+pip3 install -r requirements.txt
+```
+
+## Arguments ##
+```bash
+python3 train.py --host --port --town --total_timesteps --reload_model --fps --config --num_checkpoints --no_render
+```
+
+### Configuration file
+The configuration is located in `config.py`. It contains the following parameters:
+- `algorithm`: The RL algorithm to use. Algorithms with continuous action space are supported now.
+- `algoritm_params`: The parameters of the algorithm. See the Stable Baselines 3 documentation for more information.
+- `action_smoothing`: Whether to use action smoothing or not.
+- `reward_fn`: The reward function to use. See the `agent/rewards.py` file for more information.
+- `reward_params`: The parameters of the reward function.
+- `obs_res`: The resolution of the observation. It's recommended to use `(160, 80)`
+
+
+## Usage ##
+```bash
+# Clone the repo
+git clone https://github.com/rohanNkhaire/RL_SB3_carla.git
+
+# Go inside the repo
+cd RL_SB3_carla
+
+# Run the training script
+# The default --host arg is IP of a different Host
+python3 train.py
+```
+
+## Run an experiment ##
+```bash
+# Run Carla on your system
+./CarlaUE4.sh -RenderOffScreen
+
+# Run the training and Carla on one host
+python3 train.py --host "localhost"
+```
+
+## Note ##
+This repo was tested on two host machines :-
+- Host 1 - Running carla simulator(0.9.15)
+- Host 2 - running the RL agent
+
+The ```--host``` argument is set to a different IP by default. Change this to **localhost** to run everything on your system.
+
+The inspiration of the code was taken from [this](https://github.com/alberto-mate/CARLA-SB3-RL-Training-Environment) repo. Check it out.
+----
+config.py
+import torch
+from stable_baselines3.common.noise import NormalActionNoise
+import numpy as np
+from utils import lr_schedule
+
+algorithm_params = {
+    "PPO": dict(
+        learning_rate=lr_schedule(1e-4, 1e-6, 2),
+        gamma=0.98,
+        gae_lambda=0.95,
+        clip_range=0.2,
+        ent_coef=0.05,
+        n_epochs=10,
+        n_steps=1024,
+        policy_kwargs=dict(activation_fn=torch.nn.ReLU,
+                           net_arch=[dict(pi=[500, 300], vf=[500, 300])])
+    ),
+    "SAC": dict(
+        learning_rate=lr_schedule(5e-4, 1e-6, 2),
+        buffer_size=300000,
+        batch_size=256,
+        ent_coef='auto',
+        gamma=0.98,
+        tau=0.02,
+        train_freq=64,
+        gradient_steps=64,
+        learning_starts=10000,
+        use_sde=True,
+        policy_kwargs=dict(log_std_init=-3, net_arch=[400, 300]),
+    ),
+    "DDPG": dict(
+        gamma=0.98,
+        buffer_size=200000,
+        learning_starts=10000,
+        action_noise=NormalActionNoise(mean=np.zeros(2), sigma=0.5 * np.ones(2)),
+        gradient_steps=-1,
+        learning_rate=lr_schedule(5e-4, 1e-6, 2),
+        policy_kwargs=dict(net_arch=[400, 300]),
+    ),
+    "SAC_BEST": dict(
+        learning_rate=lr_schedule(1e-4, 5e-7, 2),
+        buffer_size=300000,
+        batch_size=256,
+        ent_coef='auto',
+        gamma=0.98,
+        tau=0.02,
+        train_freq=64,
+        gradient_steps=64,
+        learning_starts=10000,
+        use_sde=True,
+        policy_kwargs=dict(log_std_init=-3, net_arch=[500, 300]),
+    ),
+}
+
+reward_params = {
+    "reward_fn_5_default": dict(
+        early_stop=True,
+        min_speed=20.0,  # km/h
+        max_speed=35.0,  # km/h
+        target_speed=25.0,  # kmh
+        max_distance=3.0,  # Max distance from center before terminating
+        max_std_center_lane=0.4,
+        max_angle_center_lane=90,
+        penalty_reward=-10,
+    ),
+     "reward_fn_5_no_early_stop": dict(
+         early_stop=False,
+         min_speed=20.0,  # km/h
+         max_speed=35.0,  # km/h
+         target_speed=25.0,  # kmh
+         max_distance=3.0,  # Max distance from center before terminating
+         max_std_center_lane=0.4,
+         max_angle_center_lane=90,
+         penalty_reward=-10,
+     ),
+    "reward_fn_5_best": dict(
+        early_stop=True,
+        min_speed=20.0,  # km/h
+        max_speed=35.0,  # km/h
+        target_speed=25.0,  # kmh
+        max_distance=2.0,  # Max distance from center before terminating
+        max_std_center_lane=0.35,
+        max_angle_center_lane=90,
+        penalty_reward=-10,
+    ),
+}
+
+_CONFIG_1 = {
+    "algorithm": "PPO",
+    "algorithm_params": algorithm_params["PPO"],
+    "action_smoothing": 0.75,
+    "reward_fn": "reward_fn5",
+    "reward_params": reward_params["reward_fn_5_best"],
+    "obs_sensor": "semantic",
+    "obs_res": (160, 80),
+}
+CONFIGS = {
+    "1": _CONFIG_1
+}
+CONFIG = None
+
+
+def set_config(config_name):
+    global CONFIG
+    CONFIG = CONFIGS[config_name]
+----
+utils.py
+import cv2
+import math
+import json
+
+import gym
+import numpy as np
+import pygame
+from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.logger import HParam
+
+
+def write_json(data, path):
+    config_dict = {}
+    with open(path, 'w', encoding='utf-8') as f:
+        for k, v in data.items():
+            if isinstance(v, str) and v.isnumeric():
+                config_dict[k] = int(v)
+            elif isinstance(v, dict):
+                config_dict[k] = dict()
+                for k_inner, v_inner in v.items():
+                    config_dict[k][k_inner] = v_inner.__str__()
+                config_dict[k] = str(config_dict[k])
+            else:
+                config_dict[k] = v.__str__()
+        json.dump(config_dict, f, indent=4)
+
+
+class VideoRecorder():
+    def __init__(self, filename, frame_size, fps=30):
+        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+        self.video_writer = cv2.VideoWriter(filename, fourcc, int(fps), (frame_size[1], frame_size[0]))
+
+    def add_frame(self, frame):
+        self.video_writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+
+    def release(self):
+        self.video_writer.release()
+
+    def __del__(self):
+        self.release()
+
+
+class HParamCallback(BaseCallback):
+    def __init__(self, config):
+        """
+        Saves the hyperparameters and metrics at the start of the training, and logs them to TensorBoard.
+        """
+        super().__init__()
+        self.config = config
+
+    def _on_training_start(self) -> None:
+        hparam_dict = {}
+        for k, v in self.config.items():
+            if isinstance(v, str) and v.isnumeric():
+                hparam_dict[k] = int(v)
+            elif isinstance(v, dict):
+                hparam_dict[k] = dict()
+                for k_inner, v_inner in v.items():
+                    hparam_dict[k][k_inner] = v_inner.__str__()
+                hparam_dict[k] = str(hparam_dict[k])
+            else:
+                hparam_dict[k] = v.__str__()
+        # define the metrics that will appear in the `HPARAMS` Tensorboard tab by referencing their tag
+        # Tensorbaord will find & display metrics from the `SCALARS` tab
+        metric_dict = {
+            "rollout/ep_len_mean": 0,
+            "train/value_loss": 0,
+        }
+        self.logger.record(
+            "hparams",
+            HParam(hparam_dict, metric_dict),
+            exclude=("stdout", "log", "json", "csv"),
+        )
+
+    def _on_step(self) -> bool:
+        return True
+
+
+class TensorboardCallback(BaseCallback):
+    """
+    Custom callback for plotting additional values in tensorboard.
+    """
+
+    def __init__(self, verbose=0):
+        super().__init__(verbose)
+
+    def _on_step(self) -> bool:
+        # Log scalar value (here a random variable)
+        if self.locals['dones'][0]:
+            self.logger.record("custom/total_reward", self.locals['infos'][0]['total_reward'])
+            self.logger.record("custom/routes_completed", self.locals['infos'][0]['routes_completed'])
+            self.logger.record("custom/total_distance", self.locals['infos'][0]['total_distance'])
+            self.logger.record("custom/avg_center_dev", self.locals['infos'][0]['avg_center_dev'])
+            self.logger.record("custom/avg_speed", self.locals['infos'][0]['avg_speed'])
+            self.logger.record("custom/mean_reward", self.locals['infos'][0]['mean_reward'])
+            self.logger.dump(self.num_timesteps)
+        return True
+
+class VideoRecorderCallback(BaseCallback):
+    def __init__(self, video_path, frame_size, video_length=-1, fps=30, skip_frame=1, verbose=0):
+        super().__init__(verbose)
+        self.video_recorder = VideoRecorder(video_path, frame_size, fps)
+        self.max_length = video_length
+        self.skip_frame = skip_frame
+
+    def _on_step(self) -> bool:
+        # Add frame to video
+        if self.max_length != -1 and self.num_timesteps > self.max_length:
+            self.video_recorder.release()
+            return False
+        # Skip every 4 frames to reduce video size
+        if self.num_timesteps % self.skip_frame != 0:
+            return True
+        display = self.training_env.unwrapped.envs[0].env.display
+        frame = np.array(pygame.surfarray.array3d(display), dtype=np.uint8).transpose([1, 0, 2])
+
+        self.video_recorder.add_frame(frame)
+        return True
+
+    def _on_training_end(self) -> None:
+        self.video_recorder.release()
+
+
+def lr_schedule(initial_value: float, end_value: float, rate: float):
+    """
+    Learning rate schedule:
+        Exponential decay by factors of 10 from initial_value to end_value.
+
+    :param initial_value: Initial learning rate.
+    :param rate: Exponential rate of decay. High values mean fast early drop in LR
+    :param end_value: The final value of the learning rate.
+    :return: schedule that computes current learning rate depending on remaining progress
+    """
+
+    def func(progress_remaining: float) -> float:
+        """
+        Progress will decrease from 1 (beginning) to 0.
+
+        :param progress_remaining: A float value between 0 and 1 that represents the remaining progress.
+        :return: The current learning rate.
+        """
+        if progress_remaining <= 0:
+            return end_value
+
+        return end_value + (initial_value - end_value) * (10 ** (rate * math.log10(progress_remaining)))
+
+    func.__str__ = lambda: f"lr_schedule({initial_value}, {end_value}, {rate})"
+    lr_schedule.__str__ = lambda: f"lr_schedule({initial_value}, {end_value}, {rate})"
+
+    return func
+
+
+class HistoryWrapperObsDict(gym.Wrapper):
+    # History Wrapper from rl-baselines3-zoo
+    # https://github.com/DLR-RM/rl-baselines3-zoo/blob/10de3a8804b14b4ea605b487ae7d8117c52901c4/rl_zoo3/wrappers.py
+    """
+    History Wrapper for dict observation.
+    :param env:
+    :param horizon: Number of steps to keep in the history.
+    """
+
+    def __init__(self, env: gym.Env, horizon: int = 2, obs_key: str = 'vae_latent') -> object:
+        self.obs_key = obs_key
+        assert isinstance(env.observation_space.spaces[obs_key], gym.spaces.Box)
+        print("Wrapping the env with HistoryWrapperObsDict.")
+        wrapped_obs_space = env.observation_space.spaces[self.obs_key]
+        wrapped_action_space = env.action_space
+
+        low_obs = np.repeat(wrapped_obs_space.low, horizon, axis=-1)
+        high_obs = np.repeat(wrapped_obs_space.high, horizon, axis=-1)
+
+        low_action = np.repeat(wrapped_action_space.low, horizon, axis=-1)
+        high_action = np.repeat(wrapped_action_space.high, horizon, axis=-1)
+
+        low = np.concatenate((low_obs, low_action))
+        high = np.concatenate((high_obs, high_action))
+
+        # Overwrite the observation space
+        env.observation_space.spaces[obs_key] = gym.spaces.Box(low=low, high=high, dtype=wrapped_obs_space.dtype)
+
+        super().__init__(env)
+
+        self.horizon = horizon
+        self.low_action, self.high_action = low_action, high_action
+        self.low_obs, self.high_obs = low_obs, high_obs
+        self.low, self.high = low, high
+        self.obs_history = np.zeros(low_obs.shape, low_obs.dtype)
+        self.action_history = np.zeros(low_action.shape, low_action.dtype)
+
+    def _create_obs_from_history(self):
+        return np.concatenate((self.obs_history, self.action_history))
+
+    def reset(self):
+        # Flush the history
+        self.obs_history[...] = 0
+        self.action_history[...] = 0
+        obs_dict = self.env.reset()
+        obs = obs_dict[self.obs_key]
+        self.obs_history[..., -obs.shape[-1]:] = obs
+
+        obs_dict[self.obs_key] = self._create_obs_from_history()
+
+        return obs_dict
+
+    def step(self, action):
+        obs_dict, reward, done, info = self.env.step(action)
+        obs = obs_dict[self.obs_key]
+        last_ax_size = obs.shape[-1]
+
+        self.obs_history = np.roll(self.obs_history, shift=-last_ax_size, axis=-1)
+        self.obs_history[..., -obs.shape[-1]:] = obs
+
+        self.action_history = np.roll(self.action_history, shift=-action.shape[-1], axis=-1)
+        self.action_history[..., -action.shape[-1]:] = action
+
+        obs_dict[self.obs_key] = self._create_obs_from_history()
+
+        return obs_dict, reward, done, info
+
+
+class FrameSkip(gym.Wrapper):
+    """
+    Return only every ``skip``-th frame (frameskipping)
+    :param env: the environment
+    :param skip: number of ``skip``-th frame
+    """
+
+    def __init__(self, env: gym.Env, skip: int = 4):
+        super().__init__(env)
+        print("Wrapping the env with FrameSkip.")
+        self._skip = skip
+
+    def step(self, action: np.ndarray):
+        """
+        Step the environment with the given action
+        Repeat action, sum reward.
+        :param action: the action
+        :return: observation, reward, done, information
+        """
+        total_reward = 0.0
+        done = None
+        for _ in range(self._skip):
+            obs, reward, done, info = self.env.step(action)
+            total_reward += reward
+            if done:
+                break
+
+        return obs, total_reward, done, info
+
+    def reset(self):
+        return self.env.reset()
+
+
+def parse_wrapper_class(wrapper_class_str: str):
+    """
+    Parse a string to a wrapper class.
+
+    :param wrapper_class_str: (str) The string to parse.
+    :return: (type) The wrapper class and its parameters.
+    """
+    wrap_class, wrap_params = wrapper_class_str.split("_", 1)
+    wrap_params = wrap_params.split("_")
+    wrap_params = [int(param) if param.isnumeric() else param for param in wrap_params]
+
+    if wrap_class == "HistoryWrapperObsDict":
+        return HistoryWrapperObsDict, wrap_params
+    elif wrap_class == "FrameSkip":
+        return FrameSkip, wrap_params
+----
+train.py
+import warnings
+import os
+
+warnings.filterwarnings("ignore")
+os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
+
+import argparse
+import config
+import time
+
+parser = argparse.ArgumentParser(description="Trains a CARLA agent")
+parser.add_argument("--host", default="127.0.0.1", type=str, help="IP of the host server (default: 127.0.0.1)")
+parser.add_argument("--port", default=2000, type=int, help="TCP port to listen to (default: 2000)")
+parser.add_argument("--town", default="Town10HD", type=str, help="Name of the map in CARLA")
+parser.add_argument("--total_timesteps", type=int, default=1_000_000, help="Total timestep to train for")
+parser.add_argument("--reload_model", type=str, default="", help="Path to a model to reload")
+parser.add_argument("--no_render", action="store_false", help="If True, render the environment")
+parser.add_argument("--fps", type=int, default=15, help="FPS to render the environment")
+parser.add_argument("--num_checkpoints", type=int, default=10, help="Checkpoint frequency")
+parser.add_argument("--config", type=str, default="1", help="Config to use (default: 1)")
+
+args = vars(parser.parse_args())
+config.set_config(args["config"])
+
+from stable_baselines3 import PPO, DDPG, SAC
+from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.logger import configure
+from agent.env import CarlaEnv
+
+from agent.rewards import reward_functions
+from utils import HParamCallback, TensorboardCallback, write_json, parse_wrapper_class
+
+from config import CONFIG
+
+log_dir = 'tensorboard'
+os.makedirs(log_dir, exist_ok=True)
+reload_model = args["reload_model"]
+total_timesteps = args["total_timesteps"]
+
+algorithm_dict = {"PPO": PPO, "DDPG": DDPG, "SAC": SAC}
+if CONFIG["algorithm"] not in algorithm_dict:
+    raise ValueError("Invalid algorithm name")
+
+AlgorithmRL = algorithm_dict[CONFIG["algorithm"]]
+
+env = CarlaEnv(host=args["host"], port=args["port"], town=args["town"],
+                fps=args["fps"], obs_sensor=CONFIG["obs_sensor"], obs_res=CONFIG["obs_res"], 
+                    reward_fn=reward_functions[CONFIG["reward_fn"]],
+                    view_res=(1120, 560), action_smoothing=CONFIG["action_smoothing"],
+                    allow_spectator=True, allow_render=args["no_render"])
+
+if reload_model == "":
+    model = AlgorithmRL('CnnPolicy', env, verbose=2, tensorboard_log=log_dir, device='cuda',
+                        **CONFIG["algorithm_params"])
+    model_suffix = f"{int(time.time())}_id{args['config']}"
+else:
+    model = AlgorithmRL.load(reload_model, env=env, device='cuda', **CONFIG["algorithm_params"])
+    model_suffix = f"{reload_model.split('/')[-2].split('_')[-1]}_finetuning"
+
+model_name = f'{model.__class__.__name__}_{model_suffix}'
+
+model_dir = os.path.join(log_dir, model_name)
+new_logger = configure(model_dir, ["stdout", "csv", "tensorboard"])
+model.set_logger(new_logger)
+write_json(CONFIG, os.path.join(model_dir, 'config.json'))
+
+model.learn(total_timesteps=total_timesteps,
+            callback=[HParamCallback(CONFIG), TensorboardCallback(1), CheckpointCallback(
+                save_freq=total_timesteps // args["num_checkpoints"],
+                save_path=model_dir,
+                name_prefix="model")], reset_num_timesteps=False)
+----
+requirements.txt
+torch==2.2.1
+stable-baselines3==2.2.1
+gym==0.26.2
+pygame==2.5.2
+carla==0.9.15
+shimmy==1.3.0
+tensorboard==2.16.2
+----
+tools/__init__.py
+
+----
+tools/misc.py
+#!/usr/bin/env python
+
+# Copyright (c) 2018 Intel Labs.
+# authors: German Ros (german.ros@intel.com)
+#
+# This work is licensed under the terms of the MIT license.
+# For a copy, see <https://opensource.org/licenses/MIT>.
+
+""" Module with auxiliary functions. """
+
+import math
+import numpy as np
+import carla
+
+def draw_waypoints(world, waypoints, z=0.5):
+    """
+    Draw a list of waypoints at a certain height given in z.
+
+        :param world: carla.world object
+        :param waypoints: list or iterable container with the waypoints to draw
+        :param z: height in meters
+    """
+    for wpt in waypoints:
+        wpt_t = wpt.transform
+        begin = wpt_t.location + carla.Location(z=z)
+        angle = math.radians(wpt_t.rotation.yaw)
+        end = begin + carla.Location(x=math.cos(angle), y=math.sin(angle))
+        world.debug.draw_arrow(begin, end, arrow_size=0.3, life_time=1.0)
+
+
+def get_speed(vehicle):
+    """
+    Compute speed of a vehicle in Km/h.
+
+        :param vehicle: the vehicle for which speed is calculated
+        :return: speed as a float in Km/h
+    """
+    vel = vehicle.get_velocity()
+
+    return 3.6 * math.sqrt(vel.x ** 2 + vel.y ** 2 + vel.z ** 2)
+
+def get_trafficlight_trigger_location(traffic_light):
+    """
+    Calculates the yaw of the waypoint that represents the trigger volume of the traffic light
+    """
+    def rotate_point(point, radians):
+        """
+        rotate a given point by a given angle
+        """
+        rotated_x = math.cos(radians) * point.x - math.sin(radians) * point.y
+        rotated_y = math.sin(radians) * point.x - math.cos(radians) * point.y
+
+        return carla.Vector3D(rotated_x, rotated_y, point.z)
+
+    base_transform = traffic_light.get_transform()
+    base_rot = base_transform.rotation.yaw
+    area_loc = base_transform.transform(traffic_light.trigger_volume.location)
+    area_ext = traffic_light.trigger_volume.extent
+
+    point = rotate_point(carla.Vector3D(0, 0, area_ext.z), math.radians(base_rot))
+    point_location = area_loc + carla.Location(x=point.x, y=point.y)
+
+    return carla.Location(point_location.x, point_location.y, point_location.z)
+
+
+def is_within_distance(target_transform, reference_transform, max_distance, angle_interval=None):
+    """
+    Check if a location is both within a certain distance from a reference object.
+    By using 'angle_interval', the angle between the location and reference transform
+    will also be tkaen into account, being 0 a location in front and 180, one behind.
+
+    :param target_transform: location of the target object
+    :param reference_transform: location of the reference object
+    :param max_distance: maximum allowed distance
+    :param angle_interval: only locations between [min, max] angles will be considered. This isn't checked by default.
+    :return: boolean
+    """
+    target_vector = np.array([
+        target_transform.location.x - reference_transform.location.x,
+        target_transform.location.y - reference_transform.location.y
+    ])
+    norm_target = np.linalg.norm(target_vector)
+
+    # If the vector is too short, we can simply stop here
+    if norm_target < 0.001:
+        return True
+
+    # Further than the max distance
+    if norm_target > max_distance:
+        return False
+
+    # We don't care about the angle, nothing else to check
+    if not angle_interval:
+        return True
+
+    min_angle = angle_interval[0]
+    max_angle = angle_interval[1]
+
+    fwd = reference_transform.get_forward_vector()
+    forward_vector = np.array([fwd.x, fwd.y])
+    angle = math.degrees(math.acos(np.clip(np.dot(forward_vector, target_vector) / norm_target, -1., 1.)))
+
+    return min_angle < angle < max_angle
+
+
+def compute_magnitude_angle(target_location, current_location, orientation):
+    """
+    Compute relative angle and distance between a target_location and a current_location
+
+        :param target_location: location of the target object
+        :param current_location: location of the reference object
+        :param orientation: orientation of the reference object
+        :return: a tuple composed by the distance to the object and the angle between both objects
+    """
+    target_vector = np.array([target_location.x - current_location.x, target_location.y - current_location.y])
+    norm_target = np.linalg.norm(target_vector)
+
+    forward_vector = np.array([math.cos(math.radians(orientation)), math.sin(math.radians(orientation))])
+    d_angle = math.degrees(math.acos(np.clip(np.dot(forward_vector, target_vector) / norm_target, -1., 1.)))
+
+    return (norm_target, d_angle)
+
+
+def distance_vehicle(waypoint, vehicle_transform):
+    """
+    Returns the 2D distance from a waypoint to a vehicle
+
+        :param waypoint: actual waypoint
+        :param vehicle_transform: transform of the target vehicle
+    """
+    loc = vehicle_transform.location
+    x = waypoint.transform.location.x - loc.x
+    y = waypoint.transform.location.y - loc.y
+
+    return math.sqrt(x * x + y * y)
+
+
+def vector(location_1, location_2):
+    """
+    Returns the unit vector from location_1 to location_2
+
+        :param location_1, location_2: carla.Location objects
+    """
+    x = location_2.x - location_1.x
+    y = location_2.y - location_1.y
+    z = location_2.z - location_1.z
+    norm = np.linalg.norm([x, y, z]) + np.finfo(float).eps
+
+    return [x / norm, y / norm, z / norm]
+
+
+def compute_distance(location_1, location_2):
+    """
+    Euclidean distance between 3D points
+
+        :param location_1, location_2: 3D points
+    """
+    x = location_2.x - location_1.x
+    y = location_2.y - location_1.y
+    z = location_2.z - location_1.z
+    norm = np.linalg.norm([x, y, z]) + np.finfo(float).eps
+    return norm
+
+
+def positive(num):
+    """
+    Return the given number if positive, else 0
+
+        :param num: value to check
+    """
+    return num if num > 0.0 else 0.0
+
+----
+agent/__init__.py
+
+----
+agent/env.py
+import carla
+import gym
+import time
+import random
+import numpy as np
+import math
+from gym import spaces
+from collections import deque
+import pygame
+import cv2
+
+
+from utilities.graphics import HUD
+from utilities.utils import get_actor_display_name, smooth_action, vector, distance_to_line, build_projection_matrix, get_image_point
+from core_rl.actions import CarlaActions
+from core_rl.observation import CarlaObservations
+from utilities.planner import compute_route_waypoints
+
+# Carla environment
+class CarlaEnv(gym.Env):
+
+    metadata = {'render.modes': ['human']}
+
+    def __init__(self, host, port, town, fps, obs_sensor, obs_res, view_res, reward_fn, action_smoothing, allow_render=True, allow_spectator=True):
+        
+        self.obs_width, self.obs_height = obs_res
+        self.spectator_width, self.spectator_height = view_res
+        self.allow_render = allow_render
+        self.allow_spectator = allow_spectator
+        self.spectator_camera = None
+        self.episode_idx = -2
+        self.world = None
+        self.fps = fps
+        self.actions = CarlaActions()
+        self.observations = CarlaObservations(self.obs_height, self.obs_width)
+        self.obs_sensor = obs_sensor
+        self.control = carla.VehicleControl()
+        self.action_space = self.actions.get_action_space()
+        self.observation_space = self.observations.get_observation_space()
+        self.max_distance = 3000
+        self.action_smoothing = action_smoothing
+        self.reward_fn = (lambda x: 0) if not callable(reward_fn) else reward_fn
+
+        try:
+            self.client = carla.Client(host, port)  
+            self.client.set_timeout(100.0)
+
+            self.client.load_world(map_name=town)
+            self.world = self.client.get_world()
+            self.world.set_weather(carla.WeatherParameters.ClearNoon)  
+            self.world.apply_settings(
+                carla.WorldSettings(  
+                    synchronous_mode=True,
+                    fixed_delta_seconds=1.0 / fps,
+                ))
+            self.client.reload_world(False)  # reload map keeping the world settings
+            self.map = self.world.get_map()
+
+            # Spawn Vehicle
+            self.tesla = self.world.get_blueprint_library().filter('model3')[0]
+            self.start_transform = self._get_start_transform()
+            self.curr_loc = self.start_transform.location
+            self.vehicle = self.world.spawn_actor(self.tesla, self.start_transform)
+
+           # Spawn collision and Lane invasion sensors
+            colsensor = self.world.get_blueprint_library().find('sensor.other.collision')
+            lanesensor = self.world.get_blueprint_library().find('sensor.other.lane_invasion')
+            self.colsensor = self.world.spawn_actor(colsensor, carla.Transform(), attach_to=self.vehicle)
+            self.lanesensor = self.world.spawn_actor(lanesensor, carla.Transform(), attach_to=self.vehicle)
+            self.colsensor.listen(self._collision_data)
+            self.lanesensor.listen(self._lane_invasion_data)  
+
+            # Create hud and initialize pygame for visualization
+            if self.allow_render:
+                pygame.init()
+                pygame.font.init()
+                self.display = pygame.display.set_mode((self.spectator_width, self.spectator_height), pygame.HWSURFACE | pygame.DOUBLEBUF)
+                self.clock = pygame.time.Clock()
+                self.hud = HUD(self.spectator_width, self.spectator_height)
+                self.hud.set_vehicle(self.vehicle)
+                self.world.on_tick(self.hud.on_world_tick)
+
+            # Set observation image
+            if 'rgb' in self.obs_sensor:
+                self.rgb_cam = self.world.get_blueprint_library().find('sensor.camera.rgb')
+            elif 'semantic' in self.obs_sensor:
+                self.rgb_cam = self.world.get_blueprint_library().find('sensor.camera.semantic_segmentation')
+            else:
+                raise NotImplementedError('unknown sensor type')
+
+            self.rgb_cam.set_attribute('image_size_x', f'{self.obs_width}')
+            self.rgb_cam.set_attribute('image_size_y', f'{self.obs_height}')
+            self.rgb_cam.set_attribute('fov', '90')
+
+            bound_x = self.vehicle.bounding_box.extent.x
+            transform_front = carla.Transform(carla.Location(x=bound_x, z=1.0))
+            self.sensor_front = self.world.spawn_actor(self.rgb_cam, transform_front, attach_to=self.vehicle)
+            self.sensor_front.listen(self._set_observation_image)          
+ 
+            # Set spectator cam   
+            if self.allow_spectator:
+                self.spectator_camera = self.world.get_blueprint_library().find('sensor.camera.rgb')
+                self.spectator_camera.set_attribute('image_size_x', f'{self.spectator_width}')
+                self.spectator_camera.set_attribute('image_size_y', f'{self.spectator_height}')
+                self.spectator_camera.set_attribute('fov', '100')
+                transform = carla.Transform(carla.Location(x=-5.5, z=2.5), carla.Rotation(pitch=-10.0))
+                self.spectator_sensor = self.world.spawn_actor(self.spectator_camera, transform, attach_to=self.vehicle)
+                self.spectator_sensor.listen(self._set_viewer_image)
+                    
+        except RuntimeError as msg:
+            pass
+
+        self.reset()
+    
+    # Resets environment for new episode
+    def reset(self):
+
+        self.episode_idx += 1
+        self.num_routes_completed = -1
+
+        # Generate a random route
+        self.generate_route()
+
+        self.closed = False
+        self.terminate = False
+        self.success_state = False
+        self.extra_info = []  # List of extra info shown on the HUD
+        self.observation = self.observation_buffer = None  # Last received observation
+        self.viewer_image = self.viewer_image_buffer = None  # Last received image to show in the viewer
+        self.step_count = 0
+
+        # reset metrics
+        self.total_reward = 0.0
+        self.previous_location = self.vehicle.get_transform().location
+        self.distance_traveled = 0.0
+        self.center_lane_deviation = 0.0
+        self.speed_accum = 0.0
+        self.routes_completed = 0.0
+        self.world.tick()
+
+        # Return initial observation
+        time.sleep(0.2)
+        obs = self.step(None)[0]
+        time.sleep(0.2)
+
+        return obs
+
+    def generate_route(self):
+        # Do a soft reset (teleport vehicle)
+        self.control.steer = float(0.0)
+        self.control.throttle = float(0.0)
+        self.vehicle.set_simulate_physics(False)  # Reset the car's physics
+
+        # Generate waypoints along the lap
+
+        spawn_points_list = np.random.choice(self.map.get_spawn_points(), 2, replace=False)
+        route_length = 1
+        while route_length <= 1:
+            self.start_wp, self.end_wp = [self.map.get_waypoint(spawn.location) for spawn in
+                                          spawn_points_list]
+            self.route_waypoints = compute_route_waypoints(self.map, self.start_wp, self.end_wp, resolution=1.0)
+            route_length = len(self.route_waypoints)
+            if route_length <= 1:
+                spawn_points_list = np.random.choice(self.map.get_spawn_points(), 2, replace=False)
+
+        self.distance_from_center_history = deque(maxlen=30)
+
+        self.current_waypoint_index = 0
+        self.num_routes_completed += 1
+        self.vehicle.set_transform(self.start_wp.transform)
+        time.sleep(0.2)
+        self.vehicle.set_simulate_physics(True)     
+
+    # Steps environment
+    def step(self, action):
+
+        if action is not None:
+            # Create new route on route completion
+            if self.current_waypoint_index >= len(self.route_waypoints) - 1:
+                self.success_state = True
+
+            throttle, steer = [float(a) for a in action]
+
+            # Perfom action
+            self.control.throttle = smooth_action(self.control.throttle, throttle, self.action_smoothing)
+            self.control.steer = smooth_action(self.control.steer, steer, self.action_smoothing)
+
+            self.vehicle.apply_control(self.control)
+
+        self.world.tick()
+
+        # Get most recent observation and viewer image
+        self.observation = self._get_observation()
+        if self.allow_spectator:
+            self.viewer_image = self._get_viewer_image()
+            
+        # Get vehicle transform
+        transform = self.vehicle.get_transform()
+
+        # Keep track of closest waypoint on the route
+        self.prev_waypoint_index = self.current_waypoint_index
+        waypoint_index = self.current_waypoint_index
+        for _ in range(len(self.route_waypoints)):
+            # Check if we passed the next waypoint along the route
+            next_waypoint_index = waypoint_index + 1
+            wp, _ = self.route_waypoints[next_waypoint_index % len(self.route_waypoints)]
+            dot = np.dot(vector(wp.transform.get_forward_vector())[:2],
+                         vector(transform.location - wp.transform.location)[:2])
+            if dot > 0.0:  # Did we pass the waypoint?
+                waypoint_index += 1  # Go to next waypoint
+            else:
+                break
+        self.current_waypoint_index = waypoint_index
+
+        # Check for route completion
+        if self.current_waypoint_index < len(self.route_waypoints) - 1:
+            self.next_waypoint, self.next_road_maneuver = self.route_waypoints[
+                (self.current_waypoint_index + 1) % len(self.route_waypoints)]
+
+        self.current_waypoint, self.current_road_maneuver = self.route_waypoints[
+            self.current_waypoint_index % len(self.route_waypoints)]
+        self.routes_completed = self.num_routes_completed + (self.current_waypoint_index + 1) / len(
+            self.route_waypoints)
+
+        # Calculate deviation from center of the lane
+        self.distance_from_center = distance_to_line(vector(self.current_waypoint.transform.location),
+                                                     vector(self.next_waypoint.transform.location),
+                                                     vector(transform.location))
+        self.center_lane_deviation += self.distance_from_center
+
+        # Calculate distance traveled
+        if action is not None:
+            self.distance_traveled += self.previous_location.distance(transform.location)
+        self.previous_location = transform.location
+
+        # Accumulate speed
+        self.speed_accum += self.get_vehicle_lon_speed()
+
+        # Terminal on max distance
+        if self.distance_traveled >= self.max_distance and not self.eval:
+            self.success_state = True
+
+        self.distance_from_center_history.append(self.distance_from_center)
+        
+        # Call external reward fn
+        self.last_reward = self.reward_fn(self)
+        self.total_reward += self.last_reward
+
+        self.step_count += 1
+
+        if self.allow_render:
+            pygame.event.pump()
+            if pygame.key.get_pressed()[pygame.K_ESCAPE]:
+                self.close()
+                self.terminate = True
+            self.render()
+
+        info = {
+            "closed": self.closed,
+            'total_reward': self.total_reward,
+            'routes_completed': self.routes_completed,
+            'total_distance': self.distance_traveled,
+            'avg_center_dev': (self.center_lane_deviation / self.step_count),
+            'avg_speed': (self.speed_accum / self.step_count),
+            'mean_reward': (self.total_reward / self.step_count)
+        }
+
+        return self.get_semantic_image(self.observation), self.last_reward, self.terminate or self.success_state, info
+    
+    def close(self):
+        pygame.quit()
+        if self.world is not None:
+            self.world.destroy()
+
+        self.closed = True
+    
+    def render(self, mode="human"):
+ 
+        # Tick render clock
+        self.clock.tick()
+        self.hud.tick(self.world, self.clock)
+  
+        # Add metrics to HUD
+        self.extra_info.extend([
+            "Episode {}".format(self.episode_idx),
+            "Reward: % 19.2f" % self.last_reward,
+            "",
+            "Routes completed:    % 7.2f" % self.routes_completed,
+            "Distance traveled: % 7d m" % self.distance_traveled,
+            "Center deviance:   % 7.2f m" % self.distance_from_center,
+            "Avg center dev:    % 7.2f m" % (self.center_lane_deviation / self.step_count),
+            "Avg speed:      % 7.2f km/h" % (self.speed_accum / self.step_count),
+            "Total reward:        % 7.2f" % self.total_reward,
+        ])
+        if self.allow_spectator:
+            # Blit image from spectator camera
+            self.viewer_image = self._draw_path(self.spectator_camera, self.viewer_image)
+            self.display.blit(pygame.surfarray.make_surface(self.viewer_image.swapaxes(0, 1)), (0, 0))
+
+        # Superimpose current observation into top-right corner
+        obs_h, obs_w = self.observation.height, self.observation.width
+        pos_observation = (self.display.get_size()[0] - obs_w - 10, 10)
+        self.display.blit(pygame.surfarray.make_surface(self.get_semantic_image(self.observation).swapaxes(0, 1)), pos_observation)
+
+        # Render HUD
+        self.hud.render(self.display, extra_info=self.extra_info)
+        self.extra_info = []  # Reset extra info list
+        # Render to screen
+        pygame.display.flip()
+
+    def get_vehicle_lon_speed(self):
+        carla_velocity_vec3 = self.vehicle.get_velocity()
+        vec4 = np.array([carla_velocity_vec3.x,
+                         carla_velocity_vec3.y,
+                         carla_velocity_vec3.z, 1]).reshape(4, 1)
+        carla_trans = np.array(self.vehicle.get_transform().get_matrix())
+        carla_trans.reshape(4, 4)
+        carla_trans[0:3, 3] = 0.0
+        vel_in_vehicle = np.linalg.inv(carla_trans) @ vec4
+        return vel_in_vehicle[0]  
+
+    def get_rgb_image(self, input):
+        # Converting to suitable format for opencv function
+        image = np.frombuffer(input.raw_data, dtype=np.uint8)
+        image = image.reshape((input.height, input.width, 4))
+        image = image[: ,: ,:3]
+        image = image[:, :, ::-1].copy()
+
+        return image
+
+    def get_semantic_image(self, input):
+        image = image = np.frombuffer(input.raw_data, dtype=np.uint8)
+        image = image.reshape((input.height, input.width, 4))
+        image = image[:, :, 2]
+        classes = {
+            0: [0, 0, 0],         # None
+            1: [70, 70, 70],      # Buildings
+            2: [190, 153, 153],   # Fences
+            3: [72, 0, 90],       # Other
+            4: [220, 20, 60],     # Pedestrians
+            5: [153, 153, 153],   # Poles
+            6: [157, 234, 50],    # RoadLines
+            7: [128, 64, 128],    # Roads
+            8: [244, 35, 232],    # Sidewalks
+            9: [107, 142, 35],    # Vegetation
+            10: [0, 0, 255],      # Vehicles
+            11: [102, 102, 156],  # Walls
+            12: [220, 220, 0]     # TrafficSigns
+    }
+        result = np.zeros((image.shape[0], image.shape[1], 3))
+        for key, value in classes.items():
+            result[np.where(image == key)] = value
+        return result
+        
+    def _destroy_agents(self):
+
+        for actor in self.actor_list:
+
+            # If it has a callback attached, remove it first
+            if hasattr(actor, 'is_listening') and actor.is_listening:
+                actor.stop()
+
+            # If it's still alive - desstroy it
+            if actor.is_alive:
+                actor.destroy()
+
+        self.actor_list = []
+
+    def _collision_data(self, event):
+
+        # What we collided with and what was the impulse
+        if get_actor_display_name(event.other_actor) != "Road":
+            self.terminate = True
+        if self.allow_render:
+            self.hud.notification("Collision with {}".format(get_actor_display_name(event.other_actor)))
+
+        #collision_impulse = math.sqrt(event.normal_impulse.x ** 2 + event.normal_impulse.y ** 2 + event.normal_impulse.z ** 2)
+
+        
+    def _lane_invasion_data(self, event):
+
+        self.terminate = True
+        lane_types = set(x.type for x in event.crossed_lane_markings)
+        text = ["%r" % str(x).split()[-1] for x in lane_types]
+        if self.allow_render:
+            self.hud.notification("Crossed line %s" % " and ".join(text))
+
+    def _get_observation(self):
+        while self.observation_buffer is None:
+            pass
+        obs = self.observation_buffer
+        self.observation_buffer = None
+        return obs
+
+    def _get_viewer_image(self):
+        while self.viewer_image_buffer is None:
+            pass
+        image = self.viewer_image_buffer
+        self.viewer_image_buffer = None
+        return image
+
+    def _get_start_transform(self):
+        return random.choice(self.map.get_spawn_points())  
+
+    def _set_observation_image(self, image):
+        self.observation_buffer = image
+
+    def _set_viewer_image(self, image):
+        self.viewer_image_buffer = image
+
+    def _draw_path(self, camera, image):
+        """
+            Draw a connected path from start of route to end using homography.
+        """
+        vehicle_vector = vector(self.vehicle.get_transform().location)
+        # Get the world to camera matrix
+        world_2_camera = np.array(image.transform.get_inverse_matrix())
+
+        # Get the attributes from the camera
+        image_w = int(image.height)
+        image_h = int(image.width)
+        fov = float(image.fov)
+
+        image = self.get_rgb_image(image)
+
+        for i in range(self.current_waypoint_index, len(self.route_waypoints)):
+            waypoint_location = self.route_waypoints[i][0].transform.location + carla.Location(z=1.25)
+            waypoint_vector = vector(waypoint_location)
+            if not (2 < abs(np.linalg.norm(vehicle_vector - waypoint_vector)) < 50):
+                continue
+            # Calculate the camera projection matrix to project from 3D -> 2D
+            K = build_projection_matrix(image_h, image_w, fov)
+            x, y = get_image_point(waypoint_location, K, world_2_camera)
+            if i == len(self.route_waypoints) - 1:
+                color = (255, 0, 0)
+            else:
+                color = (0, 0, 255)
+            image = cv2.circle(image, (x, y), radius=3, color=color, thickness=-1)
+        return image         
+            
+    
+        
+----
+agent/rewards.py
+import numpy as np
+from config import CONFIG
+
+low_speed_timer = 0
+
+min_speed = CONFIG["reward_params"]["min_speed"]
+max_speed = CONFIG["reward_params"]["max_speed"]
+target_speed = CONFIG["reward_params"]["target_speed"]
+max_distance = CONFIG["reward_params"]["max_distance"]
+max_std_center_lane = CONFIG["reward_params"]["max_std_center_lane"]
+max_angle_center_lane = CONFIG["reward_params"]["max_angle_center_lane"]
+penalty_reward = CONFIG["reward_params"]["penalty_reward"]
+early_stop = CONFIG["reward_params"]["early_stop"]
+reward_functions = {}
+
+
+def create_reward_fn(reward_fn):
+    def func(env):
+        terminal_reason = "Running..."
+        if early_stop:
+            # Stop if speed is less than 1.0 km/h after the first 5s of an episode
+            global low_speed_timer
+            low_speed_timer += 1.0 / env.fps
+            speed = env.get_vehicle_lon_speed()
+            if low_speed_timer > 5.0 and speed < 1.0 and env.current_waypoint_index >= 0:
+                env.terminate = True
+                terminal_reason = "Vehicle stopped"
+
+            # Stop if distance from center > max distance
+            if env.distance_from_center > max_distance:
+                env.terminate = True
+                terminal_reason = "Off-track"
+
+            # Stop if speed is too high
+            if max_speed > 0 and speed > max_speed:
+                env.terminate = True
+                terminal_reason = "Too fast"
+
+        # Calculate reward
+        reward = 0
+        if not env.terminate:
+            reward += reward_fn(env)
+        else:
+            low_speed_timer = 0.0
+            reward += penalty_reward
+            print(f"{env.episode_idx}| Terminal: ", terminal_reason)
+
+        if env.success_state:
+            print(f"{env.episode_idx}| Success")
+
+        env.extra_info.extend([
+            terminal_reason,
+            ""
+        ])
+        return reward
+
+    return func
+
+
+# Reward_fn5
+def reward_fn5(env):
+    """
+        reward = Positive speed reward for being close to target speed,
+                 however, quick decline in reward beyond target speed
+               * centering factor (1 when centered, 0 when not)
+               * angle factor (1 when aligned with the road, 0 when more than max_angle_center_lane degress off)
+               * distance_std_factor (1 when std from center lane is low, 0 when not)
+    """
+
+    veh_angle = env.vehicle.get_transform().rotation.yaw
+    wayp_angle = env.current_waypoint.transform.rotation.yaw
+    angle = abs(wayp_angle - veh_angle)
+    speed_kmh = env.get_vehicle_lon_speed()
+    if speed_kmh < min_speed:  # When speed is in [0, min_speed] range
+        speed_reward = speed_kmh / min_speed  # Linearly interpolate [0, 1] over [0, min_speed]
+    elif speed_kmh > target_speed:  # When speed is in [target_speed, inf]
+        # Interpolate from [1, 0, -inf] over [target_speed, max_speed, inf]
+        speed_reward = 1.0 - (speed_kmh - target_speed) / (max_speed - target_speed)
+    else:  # Otherwise
+        speed_reward = 1.0  # Return 1 for speeds in range [min_speed, target_speed]
+
+    # Interpolated from 1 when centered to 0 when 3 m from center
+    centering_factor = max(1.0 - env.distance_from_center / max_distance, 0.0)
+
+    # Interpolated from 1 when aligned with the road to 0 when +/- 20 degress of road
+    angle_factor = max(1.0 - abs(angle / np.deg2rad(max_angle_center_lane)), 0.0)
+
+    std = np.std(env.distance_from_center_history)
+    distance_std_factor = max(1.0 - abs(std / max_std_center_lane), 0.0)
+
+    # Final reward
+    reward = speed_reward * centering_factor * angle_factor * distance_std_factor
+
+    return reward
+
+
+reward_functions["reward_fn5"] = create_reward_fn(reward_fn5)
+
+
+def reward_fn_waypoints(env):
+    """
+        reward
+            - Each time the vehicle overpasses a waypoint, it will receive a reward of 1.0
+            - When the vehicle does not pass a waypoint, it receives a reward of 0.0
+    """
+    angle = env.vehicle.get_angle(env.current_waypoint)
+    speed_kmh = env.get_vehicle_lon_speed()
+    if speed_kmh < min_speed:  # When speed is in [0, min_speed] range
+        speed_reward = speed_kmh / min_speed  # Linearly interpolate [0, 1] over [0, min_speed]
+    elif speed_kmh > target_speed:  # When speed is in [target_speed, inf]
+        # Interpolate from [1, 0, -inf] over [target_speed, max_speed, inf]
+        speed_reward = 1.0 - (speed_kmh - target_speed) / (max_speed - target_speed)
+    else:  # Otherwise
+        speed_reward = 1.0  # Return 1 for speeds in range [min_speed, target_speed]
+
+    # Interpolated from 1 when centered to 0 when 3 m from center
+    centering_factor = max(1.0 - env.distance_from_center / max_distance, 0.0)
+    reward = (env.current_waypoint_index - env.prev_waypoint_index) + speed_reward * centering_factor
+    return reward
+
+
+reward_functions["reward_fn_waypoints"] = create_reward_fn(reward_fn_waypoints)
+----
+navigation/__init__.py
+
+----
+navigation/constant_velocity_agent.py
+# Copyright (c) # Copyright (c) 2018-2020 CVC.
+#
+# This work is licensed under the terms of the MIT license.
+# For a copy, see <https://opensource.org/licenses/MIT>.
+
+"""
+This module implements an agent that roams around a track following random
+waypoints and avoiding other vehicles. The agent also responds to traffic lights.
+It can also make use of the global route planner to follow a specifed route
+"""
+
+import carla
+
+from navigation.basic_agent import BasicAgent
+
+class ConstantVelocityAgent(BasicAgent):
+    """
+    ConstantVelocityAgent implements an agent that navigates the scene at a fixed velocity.
+    This agent will fail if asked to perform turns that are impossible are the desired speed.
+    This includes lane changes. When a collision is detected, the constant velocity will stop,
+    wait for a bit, and then start again.
+    """
+
+    def __init__(self, vehicle, target_speed=20, opt_dict={}, map_inst=None, grp_inst=None):
+        """
+        Initialization the agent parameters, the local and the global planner.
+
+            :param vehicle: actor to apply to agent logic onto
+            :param target_speed: speed (in Km/h) at which the vehicle will move
+            :param opt_dict: dictionary in case some of its parameters want to be changed.
+                This also applies to parameters related to the LocalPlanner.
+            :param map_inst: carla.Map instance to avoid the expensive call of getting it.
+            :param grp_inst: GlobalRoutePlanner instance to avoid the expensive call of getting it.
+        """
+        super().__init__(vehicle, target_speed, opt_dict=opt_dict, map_inst=map_inst, grp_inst=grp_inst)
+
+        self._use_basic_behavior = False  # Whether or not to use the BasicAgent behavior when the constant velocity is down
+        self._target_speed = target_speed / 3.6  # [m/s]
+        self._current_speed = vehicle.get_velocity().length()  # [m/s]
+        self._constant_velocity_stop_time = None
+        self._collision_sensor = None
+
+        self._restart_time = float('inf')  # Time after collision before the constant velocity behavior starts again
+
+        if 'restart_time' in opt_dict:
+            self._restart_time = opt_dict['restart_time']
+        if 'use_basic_behavior' in opt_dict:
+            self._use_basic_behavior = opt_dict['use_basic_behavior']
+
+        self.is_constant_velocity_active = True
+        self._set_collision_sensor()
+        self._set_constant_velocity(target_speed)
+
+    def set_target_speed(self, speed):
+        """Changes the target speed of the agent [km/h]"""
+        self._target_speed = speed / 3.6
+        self._local_planner.set_speed(speed)
+
+    def stop_constant_velocity(self):
+        """Stops the constant velocity behavior"""
+        self.is_constant_velocity_active = False
+        self._vehicle.disable_constant_velocity()
+        self._constant_velocity_stop_time = self._world.get_snapshot().timestamp.elapsed_seconds
+
+    def restart_constant_velocity(self):
+        """Public method to restart the constant velocity"""
+        self.is_constant_velocity_active = True
+        self._set_constant_velocity(self._target_speed)
+
+    def _set_constant_velocity(self, speed):
+        """Forces the agent to drive at the specified speed"""
+        self._vehicle.enable_constant_velocity(carla.Vector3D(speed, 0, 0))
+
+    def run_step(self):
+        """Execute one step of navigation."""
+        if not self.is_constant_velocity_active:
+            if self._world.get_snapshot().timestamp.elapsed_seconds - self._constant_velocity_stop_time > self._restart_time:
+                self.restart_constant_velocity()
+                self.is_constant_velocity_active = True
+            elif self._use_basic_behavior:
+                return super(ConstantVelocityAgent, self).run_step()
+            else:
+                return carla.VehicleControl()
+
+        hazard_detected = False
+
+        # Retrieve all relevant actors
+        actor_list = self._world.get_actors()
+        vehicle_list = actor_list.filter("*vehicle*")
+        lights_list = actor_list.filter("*traffic_light*")
+
+        vehicle_speed = self._vehicle.get_velocity().length()
+
+        max_vehicle_distance = self._base_vehicle_threshold + vehicle_speed
+        affected_by_vehicle, adversary, _ = self._vehicle_obstacle_detected(vehicle_list, max_vehicle_distance)
+        if affected_by_vehicle:
+            vehicle_velocity = self._vehicle.get_velocity()
+            if vehicle_velocity.length() == 0:
+                hazard_speed = 0
+            else:
+                hazard_speed = vehicle_velocity.dot(adversary.get_velocity()) / vehicle_velocity.length()
+            hazard_detected = True
+
+        # Check if the vehicle is affected by a red traffic light
+        max_tlight_distance = self._base_tlight_threshold + 0.3 * vehicle_speed
+        affected_by_tlight, _ = self._affected_by_traffic_light(lights_list, max_tlight_distance)
+        if affected_by_tlight:
+            hazard_speed = 0
+            hazard_detected = True
+
+        # The longitudinal PID is overwritten by the constant velocity but it is
+        # still useful to apply it so that the vehicle isn't moving with static wheels
+        control = self._local_planner.run_step()
+        if hazard_detected:
+            self._set_constant_velocity(hazard_speed)
+        else:
+            self._set_constant_velocity(self._target_speed)
+
+        return control
+
+    def _set_collision_sensor(self):
+        blueprint = self._world.get_blueprint_library().find('sensor.other.collision')
+        self._collision_sensor = self._world.spawn_actor(blueprint, carla.Transform(), attach_to=self._vehicle)
+        self._collision_sensor.listen(lambda event: self.stop_constant_velocity())
+
+    def destroy_sensor(self):
+        if self._collision_sensor:
+            self._collision_sensor.destroy()
+            self._collision_sensor = None
+
+----
+navigation/global_route_planner.py
+# Copyright (c) # Copyright (c) 2018-2020 CVC.
+#
+# This work is licensed under the terms of the MIT license.
+# For a copy, see <https://opensource.org/licenses/MIT>.
+
+
+"""
+This module provides GlobalRoutePlanner implementation.
+"""
+
+import math
+import numpy as np
+import networkx as nx
+
+import carla
+from navigation.local_planner import RoadOption
+from tools.misc import vector
+
+class GlobalRoutePlanner(object):
+    """
+    This class provides a very high level route plan.
+    """
+
+    def __init__(self, wmap, sampling_resolution):
+        self._sampling_resolution = sampling_resolution
+        self._wmap = wmap
+        self._topology = None
+        self._graph = None
+        self._id_map = None
+        self._road_id_to_edge = None
+
+        self._intersection_end_node = -1
+        self._previous_decision = RoadOption.VOID
+
+        # Build the graph
+        self._build_topology()
+        self._build_graph()
+        self._find_loose_ends()
+        self._lane_change_link()
+
+    def trace_route(self, origin, destination):
+        """
+        This method returns list of (carla.Waypoint, RoadOption)
+        from origin to destination
+        """
+        route_trace = []
+        route = self._path_search(origin, destination)
+        current_waypoint = self._wmap.get_waypoint(origin)
+        destination_waypoint = self._wmap.get_waypoint(destination)
+
+        for i in range(len(route) - 1):
+            road_option = self._turn_decision(i, route)
+            edge = self._graph.edges[route[i], route[i+1]]
+            path = []
+
+            if edge['type'] != RoadOption.LANEFOLLOW and edge['type'] != RoadOption.VOID:
+                route_trace.append((current_waypoint, road_option))
+                exit_wp = edge['exit_waypoint']
+                n1, n2 = self._road_id_to_edge[exit_wp.road_id][exit_wp.section_id][exit_wp.lane_id]
+                next_edge = self._graph.edges[n1, n2]
+                if next_edge['path']:
+                    closest_index = self._find_closest_in_list(current_waypoint, next_edge['path'])
+                    closest_index = min(len(next_edge['path'])-1, closest_index+5)
+                    current_waypoint = next_edge['path'][closest_index]
+                else:
+                    current_waypoint = next_edge['exit_waypoint']
+                route_trace.append((current_waypoint, road_option))
+
+            else:
+                path = path + [edge['entry_waypoint']] + edge['path'] + [edge['exit_waypoint']]
+                closest_index = self._find_closest_in_list(current_waypoint, path)
+                for waypoint in path[closest_index:]:
+                    current_waypoint = waypoint
+                    route_trace.append((current_waypoint, road_option))
+                    if len(route)-i <= 2 and waypoint.transform.location.distance(destination) < 2*self._sampling_resolution:
+                        break
+                    elif len(route)-i <= 2 and current_waypoint.road_id == destination_waypoint.road_id and current_waypoint.section_id == destination_waypoint.section_id and current_waypoint.lane_id == destination_waypoint.lane_id:
+                        destination_index = self._find_closest_in_list(destination_waypoint, path)
+                        if closest_index > destination_index:
+                            break
+
+        return route_trace
+
+    def _build_topology(self):
+        """
+        This function retrieves topology from the server as a list of
+        road segments as pairs of waypoint objects, and processes the
+        topology into a list of dictionary objects with the following attributes
+
+        - entry (carla.Waypoint): waypoint of entry point of road segment
+        - entryxyz (tuple): (x,y,z) of entry point of road segment
+        - exit (carla.Waypoint): waypoint of exit point of road segment
+        - exitxyz (tuple): (x,y,z) of exit point of road segment
+        - path (list of carla.Waypoint):  list of waypoints between entry to exit, separated by the resolution
+        """
+        self._topology = []
+        # Retrieving waypoints to construct a detailed topology
+        for segment in self._wmap.get_topology():
+            wp1, wp2 = segment[0], segment[1]
+            l1, l2 = wp1.transform.location, wp2.transform.location
+            # Rounding off to avoid floating point imprecision
+            x1, y1, z1, x2, y2, z2 = np.round([l1.x, l1.y, l1.z, l2.x, l2.y, l2.z], 0)
+            wp1.transform.location, wp2.transform.location = l1, l2
+            seg_dict = dict()
+            seg_dict['entry'], seg_dict['exit'] = wp1, wp2
+            seg_dict['entryxyz'], seg_dict['exitxyz'] = (x1, y1, z1), (x2, y2, z2)
+            seg_dict['path'] = []
+            endloc = wp2.transform.location
+            if wp1.transform.location.distance(endloc) > self._sampling_resolution:
+                w = wp1.next(self._sampling_resolution)[0]
+                while w.transform.location.distance(endloc) > self._sampling_resolution:
+                    seg_dict['path'].append(w)
+                    next_ws = w.next(self._sampling_resolution)
+                    if len(next_ws) == 0:
+                        break
+                    w = next_ws[0]
+            else:
+                next_wps = wp1.next(self._sampling_resolution)
+                if len(next_wps) == 0:
+                    continue
+                seg_dict['path'].append(next_wps[0])
+            self._topology.append(seg_dict)
+
+    def _build_graph(self):
+        """
+        This function builds a networkx graph representation of topology, creating several class attributes:
+        - graph (networkx.DiGraph): networkx graph representing the world map, with:
+            Node properties:
+                vertex: (x,y,z) position in world map
+            Edge properties:
+                entry_vector: unit vector along tangent at entry point
+                exit_vector: unit vector along tangent at exit point
+                net_vector: unit vector of the chord from entry to exit
+                intersection: boolean indicating if the edge belongs to an  intersection
+        - id_map (dictionary): mapping from (x,y,z) to node id
+        - road_id_to_edge (dictionary): map from road id to edge in the graph
+        """
+
+        self._graph = nx.DiGraph()
+        self._id_map = dict()  # Map with structure {(x,y,z): id, ... }
+        self._road_id_to_edge = dict()  # Map with structure {road_id: {lane_id: edge, ... }, ... }
+
+        for segment in self._topology:
+            entry_xyz, exit_xyz = segment['entryxyz'], segment['exitxyz']
+            path = segment['path']
+            entry_wp, exit_wp = segment['entry'], segment['exit']
+            intersection = entry_wp.is_junction
+            road_id, section_id, lane_id = entry_wp.road_id, entry_wp.section_id, entry_wp.lane_id
+
+            for vertex in entry_xyz, exit_xyz:
+                # Adding unique nodes and populating id_map
+                if vertex not in self._id_map:
+                    new_id = len(self._id_map)
+                    self._id_map[vertex] = new_id
+                    self._graph.add_node(new_id, vertex=vertex)
+            n1 = self._id_map[entry_xyz]
+            n2 = self._id_map[exit_xyz]
+            if road_id not in self._road_id_to_edge:
+                self._road_id_to_edge[road_id] = dict()
+            if section_id not in self._road_id_to_edge[road_id]:
+                self._road_id_to_edge[road_id][section_id] = dict()
+            self._road_id_to_edge[road_id][section_id][lane_id] = (n1, n2)
+
+            entry_carla_vector = entry_wp.transform.rotation.get_forward_vector()
+            exit_carla_vector = exit_wp.transform.rotation.get_forward_vector()
+
+            # Adding edge with attributes
+            self._graph.add_edge(
+                n1, n2,
+                length=len(path) + 1, path=path,
+                entry_waypoint=entry_wp, exit_waypoint=exit_wp,
+                entry_vector=np.array(
+                    [entry_carla_vector.x, entry_carla_vector.y, entry_carla_vector.z]),
+                exit_vector=np.array(
+                    [exit_carla_vector.x, exit_carla_vector.y, exit_carla_vector.z]),
+                net_vector=vector(entry_wp.transform.location, exit_wp.transform.location),
+                intersection=intersection, type=RoadOption.LANEFOLLOW)
+
+    def _find_loose_ends(self):
+        """
+        This method finds road segments that have an unconnected end, and
+        adds them to the internal graph representation
+        """
+        count_loose_ends = 0
+        hop_resolution = self._sampling_resolution
+        for segment in self._topology:
+            end_wp = segment['exit']
+            exit_xyz = segment['exitxyz']
+            road_id, section_id, lane_id = end_wp.road_id, end_wp.section_id, end_wp.lane_id
+            if road_id in self._road_id_to_edge \
+                    and section_id in self._road_id_to_edge[road_id] \
+                    and lane_id in self._road_id_to_edge[road_id][section_id]:
+                pass
+            else:
+                count_loose_ends += 1
+                if road_id not in self._road_id_to_edge:
+                    self._road_id_to_edge[road_id] = dict()
+                if section_id not in self._road_id_to_edge[road_id]:
+                    self._road_id_to_edge[road_id][section_id] = dict()
+                n1 = self._id_map[exit_xyz]
+                n2 = -1*count_loose_ends
+                self._road_id_to_edge[road_id][section_id][lane_id] = (n1, n2)
+                next_wp = end_wp.next(hop_resolution)
+                path = []
+                while next_wp is not None and next_wp \
+                        and next_wp[0].road_id == road_id \
+                        and next_wp[0].section_id == section_id \
+                        and next_wp[0].lane_id == lane_id:
+                    path.append(next_wp[0])
+                    next_wp = next_wp[0].next(hop_resolution)
+                if path:
+                    n2_xyz = (path[-1].transform.location.x,
+                              path[-1].transform.location.y,
+                              path[-1].transform.location.z)
+                    self._graph.add_node(n2, vertex=n2_xyz)
+                    self._graph.add_edge(
+                        n1, n2,
+                        length=len(path) + 1, path=path,
+                        entry_waypoint=end_wp, exit_waypoint=path[-1],
+                        entry_vector=None, exit_vector=None, net_vector=None,
+                        intersection=end_wp.is_junction, type=RoadOption.LANEFOLLOW)
+
+    def _lane_change_link(self):
+        """
+        This method places zero cost links in the topology graph
+        representing availability of lane changes.
+        """
+
+        for segment in self._topology:
+            left_found, right_found = False, False
+
+            for waypoint in segment['path']:
+                if not segment['entry'].is_junction:
+                    next_waypoint, next_road_option, next_segment = None, None, None
+
+                    if waypoint.right_lane_marking and waypoint.right_lane_marking.lane_change & carla.LaneChange.Right and not right_found:
+                        next_waypoint = waypoint.get_right_lane()
+                        if next_waypoint is not None \
+                                and next_waypoint.lane_type == carla.LaneType.Driving \
+                                and waypoint.road_id == next_waypoint.road_id:
+                            next_road_option = RoadOption.CHANGELANERIGHT
+                            next_segment = self._localize(next_waypoint.transform.location)
+                            if next_segment is not None:
+                                self._graph.add_edge(
+                                    self._id_map[segment['entryxyz']], next_segment[0], entry_waypoint=waypoint,
+                                    exit_waypoint=next_waypoint, intersection=False, exit_vector=None,
+                                    path=[], length=0, type=next_road_option, change_waypoint=next_waypoint)
+                                right_found = True
+                    if waypoint.left_lane_marking and waypoint.left_lane_marking.lane_change & carla.LaneChange.Left and not left_found:
+                        next_waypoint = waypoint.get_left_lane()
+                        if next_waypoint is not None \
+                                and next_waypoint.lane_type == carla.LaneType.Driving \
+                                and waypoint.road_id == next_waypoint.road_id:
+                            next_road_option = RoadOption.CHANGELANELEFT
+                            next_segment = self._localize(next_waypoint.transform.location)
+                            if next_segment is not None:
+                                self._graph.add_edge(
+                                    self._id_map[segment['entryxyz']], next_segment[0], entry_waypoint=waypoint,
+                                    exit_waypoint=next_waypoint, intersection=False, exit_vector=None,
+                                    path=[], length=0, type=next_road_option, change_waypoint=next_waypoint)
+                                left_found = True
+                if left_found and right_found:
+                    break
+
+    def _localize(self, location):
+        """
+        This function finds the road segment that a given location
+        is part of, returning the edge it belongs to
+        """
+        waypoint = self._wmap.get_waypoint(location)
+        edge = None
+        try:
+            edge = self._road_id_to_edge[waypoint.road_id][waypoint.section_id][waypoint.lane_id]
+        except KeyError:
+            pass
+        return edge
+
+    def _distance_heuristic(self, n1, n2):
+        """
+        Distance heuristic calculator for path searching
+        in self._graph
+        """
+        l1 = np.array(self._graph.nodes[n1]['vertex'])
+        l2 = np.array(self._graph.nodes[n2]['vertex'])
+        return np.linalg.norm(l1-l2)
+
+    def _path_search(self, origin, destination):
+        """
+        This function finds the shortest path connecting origin and destination
+        using A* search with distance heuristic.
+        origin      :   carla.Location object of start position
+        destination :   carla.Location object of of end position
+        return      :   path as list of node ids (as int) of the graph self._graph
+        connecting origin and destination
+        """
+        start, end = self._localize(origin), self._localize(destination)
+
+        route = nx.astar_path(
+            self._graph, source=start[0], target=end[0],
+            heuristic=self._distance_heuristic, weight='length')
+        route.append(end[1])
+        return route
+
+    def _successive_last_intersection_edge(self, index, route):
+        """
+        This method returns the last successive intersection edge
+        from a starting index on the route.
+        This helps moving past tiny intersection edges to calculate
+        proper turn decisions.
+        """
+
+        last_intersection_edge = None
+        last_node = None
+        for node1, node2 in [(route[i], route[i+1]) for i in range(index, len(route)-1)]:
+            candidate_edge = self._graph.edges[node1, node2]
+            if node1 == route[index]:
+                last_intersection_edge = candidate_edge
+            if candidate_edge['type'] == RoadOption.LANEFOLLOW and candidate_edge['intersection']:
+                last_intersection_edge = candidate_edge
+                last_node = node2
+            else:
+                break
+
+        return last_node, last_intersection_edge
+
+    def _turn_decision(self, index, route, threshold=math.radians(35)):
+        """
+        This method returns the turn decision (RoadOption) for pair of edges
+        around current index of route list
+        """
+
+        decision = None
+        previous_node = route[index-1]
+        current_node = route[index]
+        next_node = route[index+1]
+        next_edge = self._graph.edges[current_node, next_node]
+        if index > 0:
+            if self._previous_decision != RoadOption.VOID \
+                    and self._intersection_end_node > 0 \
+                    and self._intersection_end_node != previous_node \
+                    and next_edge['type'] == RoadOption.LANEFOLLOW \
+                    and next_edge['intersection']:
+                decision = self._previous_decision
+            else:
+                self._intersection_end_node = -1
+                current_edge = self._graph.edges[previous_node, current_node]
+                calculate_turn = current_edge['type'] == RoadOption.LANEFOLLOW and not current_edge[
+                    'intersection'] and next_edge['type'] == RoadOption.LANEFOLLOW and next_edge['intersection']
+                if calculate_turn:
+                    last_node, tail_edge = self._successive_last_intersection_edge(index, route)
+                    self._intersection_end_node = last_node
+                    if tail_edge is not None:
+                        next_edge = tail_edge
+                    cv, nv = current_edge['exit_vector'], next_edge['exit_vector']
+                    if cv is None or nv is None:
+                        return next_edge['type']
+                    cross_list = []
+                    for neighbor in self._graph.successors(current_node):
+                        select_edge = self._graph.edges[current_node, neighbor]
+                        if select_edge['type'] == RoadOption.LANEFOLLOW:
+                            if neighbor != route[index+1]:
+                                sv = select_edge['net_vector']
+                                cross_list.append(np.cross(cv, sv)[2])
+                    next_cross = np.cross(cv, nv)[2]
+                    deviation = math.acos(np.clip(
+                        np.dot(cv, nv)/(np.linalg.norm(cv)*np.linalg.norm(nv)), -1.0, 1.0))
+                    if not cross_list:
+                        cross_list.append(0)
+                    if deviation < threshold:
+                        decision = RoadOption.STRAIGHT
+                    elif cross_list and next_cross < min(cross_list):
+                        decision = RoadOption.LEFT
+                    elif cross_list and next_cross > max(cross_list):
+                        decision = RoadOption.RIGHT
+                    elif next_cross < 0:
+                        decision = RoadOption.LEFT
+                    elif next_cross > 0:
+                        decision = RoadOption.RIGHT
+                else:
+                    decision = next_edge['type']
+
+        else:
+            decision = next_edge['type']
+
+        self._previous_decision = decision
+        return decision
+
+    def _find_closest_in_list(self, current_waypoint, waypoint_list):
+        min_distance = float('inf')
+        closest_index = -1
+        for i, waypoint in enumerate(waypoint_list):
+            distance = waypoint.transform.location.distance(
+                current_waypoint.transform.location)
+            if distance < min_distance:
+                min_distance = distance
+                closest_index = i
+
+        return closest_index
+
+----
+navigation/controller.py
+# Copyright (c) # Copyright (c) 2018-2020 CVC.
+#
+# This work is licensed under the terms of the MIT license.
+# For a copy, see <https://opensource.org/licenses/MIT>.
+
+""" This module contains PID controllers to perform lateral and longitudinal control. """
+
+from collections import deque
+import math
+import numpy as np
+import carla
+from tools.misc import get_speed
+
+
+class VehiclePIDController():
+    """
+    VehiclePIDController is the combination of two PID controllers
+    (lateral and longitudinal) to perform the
+    low level control a vehicle from client side
+    """
+
+
+    def __init__(self, vehicle, args_lateral, args_longitudinal, offset=0, max_throttle=0.75, max_brake=0.3,
+                 max_steering=0.8):
+        """
+        Constructor method.
+
+        :param vehicle: actor to apply to local planner logic onto
+        :param args_lateral: dictionary of arguments to set the lateral PID controller
+        using the following semantics:
+            K_P -- Proportional term
+            K_D -- Differential term
+            K_I -- Integral term
+        :param args_longitudinal: dictionary of arguments to set the longitudinal
+        PID controller using the following semantics:
+            K_P -- Proportional term
+            K_D -- Differential term
+            K_I -- Integral term
+        :param offset: If different than zero, the vehicle will drive displaced from the center line.
+        Positive values imply a right offset while negative ones mean a left one. Numbers high enough
+        to cause the vehicle to drive through other lanes might break the controller.
+        """
+
+        self.max_brake = max_brake
+        self.max_throt = max_throttle
+        self.max_steer = max_steering
+
+        self._vehicle = vehicle
+        self._world = self._vehicle.get_world()
+        self.past_steering = self._vehicle.get_control().steer
+        self._lon_controller = PIDLongitudinalController(self._vehicle, **args_longitudinal)
+        self._lat_controller = PIDLateralController(self._vehicle, offset, **args_lateral)
+
+    def run_step(self, target_speed, waypoint):
+        """
+        Execute one step of control invoking both lateral and longitudinal
+        PID controllers to reach a target waypoint
+        at a given target_speed.
+
+            :param target_speed: desired vehicle speed
+            :param waypoint: target location encoded as a waypoint
+            :return: distance (in meters) to the waypoint
+        """
+
+        acceleration = self._lon_controller.run_step(target_speed)
+        current_steering = self._lat_controller.run_step(waypoint)
+        control = carla.VehicleControl()
+        if acceleration >= 0.0:
+            control.throttle = min(acceleration, self.max_throt)
+            control.brake = 0.0
+        else:
+            control.throttle = 0.0
+            control.brake = min(abs(acceleration), self.max_brake)
+
+        # Steering regulation: changes cannot happen abruptly, can't steer too much.
+
+        if current_steering > self.past_steering + 0.1:
+            current_steering = self.past_steering + 0.1
+        elif current_steering < self.past_steering - 0.1:
+            current_steering = self.past_steering - 0.1
+
+        if current_steering >= 0:
+            steering = min(self.max_steer, current_steering)
+        else:
+            steering = max(-self.max_steer, current_steering)
+
+        control.steer = steering
+        control.hand_brake = False
+        control.manual_gear_shift = False
+        self.past_steering = steering
+
+        return control
+
+
+    def change_longitudinal_PID(self, args_longitudinal):
+        """Changes the parameters of the PIDLongitudinalController"""
+        self._lon_controller.change_parameters(**args_longitudinal)
+
+    def change_lateral_PID(self, args_lateral):
+        """Changes the parameters of the PIDLateralController"""
+        self._lat_controller.change_parameters(**args_lateral)
+
+    def set_offset(self, offset):
+        """Changes the offset"""
+        self._lat_controller.set_offset(offset)
+
+
+class PIDLongitudinalController():
+    """
+    PIDLongitudinalController implements longitudinal control using a PID.
+    """
+
+    def __init__(self, vehicle, K_P=1.0, K_I=0.0, K_D=0.0, dt=0.03):
+        """
+        Constructor method.
+
+            :param vehicle: actor to apply to local planner logic onto
+            :param K_P: Proportional term
+            :param K_D: Differential term
+            :param K_I: Integral term
+            :param dt: time differential in seconds
+        """
+        self._vehicle = vehicle
+        self._k_p = K_P
+        self._k_i = K_I
+        self._k_d = K_D
+        self._dt = dt
+        self._error_buffer = deque(maxlen=10)
+
+    def run_step(self, target_speed, debug=False):
+        """
+        Execute one step of longitudinal control to reach a given target speed.
+
+            :param target_speed: target speed in Km/h
+            :param debug: boolean for debugging
+            :return: throttle control
+        """
+        current_speed = get_speed(self._vehicle)
+
+        if debug:
+            print('Current speed = {}'.format(current_speed))
+
+        return self._pid_control(target_speed, current_speed)
+
+    def _pid_control(self, target_speed, current_speed):
+        """
+        Estimate the throttle/brake of the vehicle based on the PID equations
+
+            :param target_speed:  target speed in Km/h
+            :param current_speed: current speed of the vehicle in Km/h
+            :return: throttle/brake control
+        """
+
+        error = target_speed - current_speed
+        self._error_buffer.append(error)
+
+        if len(self._error_buffer) >= 2:
+            _de = (self._error_buffer[-1] - self._error_buffer[-2]) / self._dt
+            _ie = sum(self._error_buffer) * self._dt
+        else:
+            _de = 0.0
+            _ie = 0.0
+
+        return np.clip((self._k_p * error) + (self._k_d * _de) + (self._k_i * _ie), -1.0, 1.0)
+
+    def change_parameters(self, K_P, K_I, K_D, dt):
+        """Changes the PID parameters"""
+        self._k_p = K_P
+        self._k_i = K_I
+        self._k_d = K_D
+        self._dt = dt
+
+
+class PIDLateralController():
+    """
+    PIDLateralController implements lateral control using a PID.
+    """
+
+    def __init__(self, vehicle, offset=0, K_P=1.0, K_I=0.0, K_D=0.0, dt=0.03):
+        """
+        Constructor method.
+
+            :param vehicle: actor to apply to local planner logic onto
+            :param offset: distance to the center line. If might cause issues if the value
+                is large enough to make the vehicle invade other lanes.
+            :param K_P: Proportional term
+            :param K_D: Differential term
+            :param K_I: Integral term
+            :param dt: time differential in seconds
+        """
+        self._vehicle = vehicle
+        self._k_p = K_P
+        self._k_i = K_I
+        self._k_d = K_D
+        self._dt = dt
+        self._offset = offset
+        self._e_buffer = deque(maxlen=10)
+
+    def run_step(self, waypoint):
+        """
+        Execute one step of lateral control to steer
+        the vehicle towards a certain waypoin.
+
+            :param waypoint: target waypoint
+            :return: steering control in the range [-1, 1] where:
+            -1 maximum steering to left
+            +1 maximum steering to right
+        """
+        return self._pid_control(waypoint, self._vehicle.get_transform())
+
+    def set_offset(self, offset):
+        """Changes the offset"""
+        self._offset = offset
+
+    def _pid_control(self, waypoint, vehicle_transform):
+        """
+        Estimate the steering angle of the vehicle based on the PID equations
+
+            :param waypoint: target waypoint
+            :param vehicle_transform: current transform of the vehicle
+            :return: steering control in the range [-1, 1]
+        """
+        # Get the ego's location and forward vector
+        ego_loc = vehicle_transform.location
+        v_vec = vehicle_transform.get_forward_vector()
+        v_vec = np.array([v_vec.x, v_vec.y, 0.0])
+
+        # Get the vector vehicle-target_wp
+        if self._offset != 0:
+            # Displace the wp to the side
+            w_tran = waypoint.transform
+            r_vec = w_tran.get_right_vector()
+            w_loc = w_tran.location + carla.Location(x=self._offset*r_vec.x,
+                                                         y=self._offset*r_vec.y)
+        else:
+            w_loc = waypoint.transform.location
+
+        w_vec = np.array([w_loc.x - ego_loc.x,
+                          w_loc.y - ego_loc.y,
+                          0.0])
+
+        wv_linalg = np.linalg.norm(w_vec) * np.linalg.norm(v_vec)
+        if wv_linalg == 0:
+            _dot = 1
+        else:
+            _dot = math.acos(np.clip(np.dot(w_vec, v_vec) / (wv_linalg), -1.0, 1.0))
+        _cross = np.cross(v_vec, w_vec)
+        if _cross[2] < 0:
+            _dot *= -1.0
+
+        self._e_buffer.append(_dot)
+        if len(self._e_buffer) >= 2:
+            _de = (self._e_buffer[-1] - self._e_buffer[-2]) / self._dt
+            _ie = sum(self._e_buffer) * self._dt
+        else:
+            _de = 0.0
+            _ie = 0.0
+
+        return np.clip((self._k_p * _dot) + (self._k_d * _de) + (self._k_i * _ie), -1.0, 1.0)
+
+    def change_parameters(self, K_P, K_I, K_D, dt):
+        """Changes the PID parameters"""
+        self._k_p = K_P
+        self._k_i = K_I
+        self._k_d = K_D
+        self._dt = dt
+
+----
+navigation/behavior_types.py
+# This work is licensed under the terms of the MIT license.
+# For a copy, see <https://opensource.org/licenses/MIT>.
+
+""" This module contains the different parameters sets for each behavior. """
+
+
+class Cautious(object):
+    """Class for Cautious agent."""
+    max_speed = 40
+    speed_lim_dist = 6
+    speed_decrease = 12
+    safety_time = 3
+    min_proximity_threshold = 12
+    braking_distance = 6
+    tailgate_counter = 0
+
+
+class Normal(object):
+    """Class for Normal agent."""
+    max_speed = 50
+    speed_lim_dist = 3
+    speed_decrease = 10
+    safety_time = 3
+    min_proximity_threshold = 10
+    braking_distance = 5
+    tailgate_counter = 0
+
+
+class Aggressive(object):
+    """Class for Aggressive agent."""
+    max_speed = 70
+    speed_lim_dist = 1
+    speed_decrease = 8
+    safety_time = 3
+    min_proximity_threshold = 8
+    braking_distance = 4
+    tailgate_counter = -1
+
+----
+navigation/local_planner.py
+# Copyright (c) # Copyright (c) 2018-2020 CVC.
+#
+# This work is licensed under the terms of the MIT license.
+# For a copy, see <https://opensource.org/licenses/MIT>.
+
+""" This module contains a local planner to perform low-level waypoint following based on PID controllers. """
+
+from enum import IntEnum
+from collections import deque
+import random
+
+import carla
+from navigation.controller import VehiclePIDController
+from tools.misc import draw_waypoints, get_speed
+
+
+class RoadOption(IntEnum):
+    """
+    RoadOption represents the possible topological configurations when moving from a segment of lane to other.
+
+    """
+    VOID = -1
+    LEFT = 1
+    RIGHT = 2
+    STRAIGHT = 3
+    LANEFOLLOW = 4
+    CHANGELANELEFT = 5
+    CHANGELANERIGHT = 6
+
+
+class LocalPlanner(object):
+    """
+    LocalPlanner implements the basic behavior of following a
+    trajectory of waypoints that is generated on-the-fly.
+
+    The low-level motion of the vehicle is computed by using two PID controllers,
+    one is used for the lateral control and the other for the longitudinal control (cruise speed).
+
+    When multiple paths are available (intersections) this local planner makes a random choice,
+    unless a given global plan has already been specified.
+    """
+
+    def __init__(self, vehicle, opt_dict={}, map_inst=None):
+        """
+        :param vehicle: actor to apply to local planner logic onto
+        :param opt_dict: dictionary of arguments with different parameters:
+            dt: time between simulation steps
+            target_speed: desired cruise speed in Km/h
+            sampling_radius: distance between the waypoints part of the plan
+            lateral_control_dict: values of the lateral PID controller
+            longitudinal_control_dict: values of the longitudinal PID controller
+            max_throttle: maximum throttle applied to the vehicle
+            max_brake: maximum brake applied to the vehicle
+            max_steering: maximum steering applied to the vehicle
+            offset: distance between the route waypoints and the center of the lane
+        :param map_inst: carla.Map instance to avoid the expensive call of getting it.
+        """
+        self._vehicle = vehicle
+        self._world = self._vehicle.get_world()
+        if map_inst:
+            if isinstance(map_inst, carla.Map):
+                self._map = map_inst
+            else:
+                print("Warning: Ignoring the given map as it is not a 'carla.Map'")
+                self._map = self._world.get_map()
+        else:
+            self._map = self._world.get_map()
+
+        self._vehicle_controller = None
+        self.target_waypoint = None
+        self.target_road_option = None
+
+        self._waypoints_queue = deque(maxlen=10000)
+        self._min_waypoint_queue_length = 100
+        self._stop_waypoint_creation = False
+
+        # Base parameters
+        self._dt = 1.0 / 20.0
+        self._target_speed = 20.0  # Km/h
+        self._sampling_radius = 2.0
+        self._args_lateral_dict = {'K_P': 1.95, 'K_I': 0.05, 'K_D': 0.2, 'dt': self._dt}
+        self._args_longitudinal_dict = {'K_P': 1.0, 'K_I': 0.05, 'K_D': 0, 'dt': self._dt}
+        self._max_throt = 0.75
+        self._max_brake = 0.3
+        self._max_steer = 0.8
+        self._offset = 0
+        self._base_min_distance = 3.0
+        self._distance_ratio = 0.5
+        self._follow_speed_limits = False
+
+        # Overload parameters
+        if opt_dict:
+            if 'dt' in opt_dict:
+                self._dt = opt_dict['dt']
+            if 'target_speed' in opt_dict:
+                self._target_speed = opt_dict['target_speed']
+            if 'sampling_radius' in opt_dict:
+                self._sampling_radius = opt_dict['sampling_radius']
+            if 'lateral_control_dict' in opt_dict:
+                self._args_lateral_dict = opt_dict['lateral_control_dict']
+            if 'longitudinal_control_dict' in opt_dict:
+                self._args_longitudinal_dict = opt_dict['longitudinal_control_dict']
+            if 'max_throttle' in opt_dict:
+                self._max_throt = opt_dict['max_throttle']
+            if 'max_brake' in opt_dict:
+                self._max_brake = opt_dict['max_brake']
+            if 'max_steering' in opt_dict:
+                self._max_steer = opt_dict['max_steering']
+            if 'offset' in opt_dict:
+                self._offset = opt_dict['offset']
+            if 'base_min_distance' in opt_dict:
+                self._base_min_distance = opt_dict['base_min_distance']
+            if 'distance_ratio' in opt_dict:
+                self._distance_ratio = opt_dict['distance_ratio']
+            if 'follow_speed_limits' in opt_dict:
+                self._follow_speed_limits = opt_dict['follow_speed_limits']
+
+        # initializing controller
+        self._init_controller()
+
+    def reset_vehicle(self):
+        """Reset the ego-vehicle"""
+        self._vehicle = None
+
+    def _init_controller(self):
+        """Controller initialization"""
+        self._vehicle_controller = VehiclePIDController(self._vehicle,
+                                                        args_lateral=self._args_lateral_dict,
+                                                        args_longitudinal=self._args_longitudinal_dict,
+                                                        offset=self._offset,
+                                                        max_throttle=self._max_throt,
+                                                        max_brake=self._max_brake,
+                                                        max_steering=self._max_steer)
+
+        # Compute the current vehicle waypoint
+        current_waypoint = self._map.get_waypoint(self._vehicle.get_location())
+        self.target_waypoint, self.target_road_option = (current_waypoint, RoadOption.LANEFOLLOW)
+        self._waypoints_queue.append((self.target_waypoint, self.target_road_option))
+
+    def set_speed(self, speed):
+        """
+        Changes the target speed
+
+        :param speed: new target speed in Km/h
+        :return:
+        """
+        if self._follow_speed_limits:
+            print("WARNING: The max speed is currently set to follow the speed limits. "
+                  "Use 'follow_speed_limits' to deactivate this")
+        self._target_speed = speed
+
+    def follow_speed_limits(self, value=True):
+        """
+        Activates a flag that makes the max speed dynamically vary according to the spped limits
+
+        :param value: bool
+        :return:
+        """
+        self._follow_speed_limits = value
+
+    def _compute_next_waypoints(self, k=1):
+        """
+        Add new waypoints to the trajectory queue.
+
+        :param k: how many waypoints to compute
+        :return:
+        """
+        # check we do not overflow the queue
+        available_entries = self._waypoints_queue.maxlen - len(self._waypoints_queue)
+        k = min(available_entries, k)
+
+        for _ in range(k):
+            last_waypoint = self._waypoints_queue[-1][0]
+            next_waypoints = list(last_waypoint.next(self._sampling_radius))
+
+            if len(next_waypoints) == 0:
+                break
+            elif len(next_waypoints) == 1:
+                # only one option available ==> lanefollowing
+                next_waypoint = next_waypoints[0]
+                road_option = RoadOption.LANEFOLLOW
+            else:
+                # random choice between the possible options
+                road_options_list = _retrieve_options(
+                    next_waypoints, last_waypoint)
+                road_option = random.choice(road_options_list)
+                next_waypoint = next_waypoints[road_options_list.index(
+                    road_option)]
+
+            self._waypoints_queue.append((next_waypoint, road_option))
+
+    def set_global_plan(self, current_plan, stop_waypoint_creation=True, clean_queue=True):
+        """
+        Adds a new plan to the local planner. A plan must be a list of [carla.Waypoint, RoadOption] pairs
+        The 'clean_queue` parameter erases the previous plan if True, otherwise, it adds it to the old one
+        The 'stop_waypoint_creation' flag stops the automatic creation of random waypoints
+
+        :param current_plan: list of (carla.Waypoint, RoadOption)
+        :param stop_waypoint_creation: bool
+        :param clean_queue: bool
+        :return:
+        """
+        if clean_queue:
+            self._waypoints_queue.clear()
+
+        # Remake the waypoints queue if the new plan has a higher length than the queue
+        new_plan_length = len(current_plan) + len(self._waypoints_queue)
+        if new_plan_length > self._waypoints_queue.maxlen:
+            new_waypoint_queue = deque(maxlen=new_plan_length)
+            for wp in self._waypoints_queue:
+                new_waypoint_queue.append(wp)
+            self._waypoints_queue = new_waypoint_queue
+
+        for elem in current_plan:
+            self._waypoints_queue.append(elem)
+
+        self._stop_waypoint_creation = stop_waypoint_creation
+
+    def set_offset(self, offset):
+        """Sets an offset for the vehicle"""
+        self._vehicle_controller.set_offset(offset)
+
+    def run_step(self, debug=False):
+        """
+        Execute one step of local planning which involves running the longitudinal and lateral PID controllers to
+        follow the waypoints trajectory.
+
+        :param debug: boolean flag to activate waypoints debugging
+        :return: control to be applied
+        """
+        if self._follow_speed_limits:
+            self._target_speed = self._vehicle.get_speed_limit()
+
+        # Add more waypoints too few in the horizon
+        if not self._stop_waypoint_creation and len(self._waypoints_queue) < self._min_waypoint_queue_length:
+            self._compute_next_waypoints(k=self._min_waypoint_queue_length)
+
+        # Purge the queue of obsolete waypoints
+        veh_location = self._vehicle.get_location()
+        vehicle_speed = get_speed(self._vehicle) / 3.6
+        self._min_distance = self._base_min_distance + self._distance_ratio * vehicle_speed
+
+        num_waypoint_removed = 0
+        for waypoint, _ in self._waypoints_queue:
+
+            if len(self._waypoints_queue) - num_waypoint_removed == 1:
+                min_distance = 1  # Don't remove the last waypoint until very close by
+            else:
+                min_distance = self._min_distance
+
+            if veh_location.distance(waypoint.transform.location) < min_distance:
+                num_waypoint_removed += 1
+            else:
+                break
+
+        if num_waypoint_removed > 0:
+            for _ in range(num_waypoint_removed):
+                self._waypoints_queue.popleft()
+
+        # Get the target waypoint and move using the PID controllers. Stop if no target waypoint
+        if len(self._waypoints_queue) == 0:
+            control = carla.VehicleControl()
+            control.steer = 0.0
+            control.throttle = 0.0
+            control.brake = 1.0
+            control.hand_brake = False
+            control.manual_gear_shift = False
+        else:
+            self.target_waypoint, self.target_road_option = self._waypoints_queue[0]
+            control = self._vehicle_controller.run_step(self._target_speed, self.target_waypoint)
+
+        if debug:
+            draw_waypoints(self._vehicle.get_world(), [self.target_waypoint], 1.0)
+
+        return control
+
+    def get_incoming_waypoint_and_direction(self, steps=3):
+        """
+        Returns direction and waypoint at a distance ahead defined by the user.
+
+            :param steps: number of steps to get the incoming waypoint.
+        """
+        if len(self._waypoints_queue) > steps:
+            return self._waypoints_queue[steps]
+
+        else:
+            try:
+                wpt, direction = self._waypoints_queue[-1]
+                return wpt, direction
+            except IndexError as i:
+                return None, RoadOption.VOID
+
+    def get_plan(self):
+        """Returns the current plan of the local planner"""
+        return self._waypoints_queue
+
+    def done(self):
+        """
+        Returns whether or not the planner has finished
+
+        :return: boolean
+        """
+        return len(self._waypoints_queue) == 0
+
+
+def _retrieve_options(list_waypoints, current_waypoint):
+    """
+    Compute the type of connection between the current active waypoint and the multiple waypoints present in
+    list_waypoints. The result is encoded as a list of RoadOption enums.
+
+    :param list_waypoints: list with the possible target waypoints in case of multiple options
+    :param current_waypoint: current active waypoint
+    :return: list of RoadOption enums representing the type of connection from the active waypoint to each
+             candidate in list_waypoints
+    """
+    options = []
+    for next_waypoint in list_waypoints:
+        # this is needed because something we are linking to
+        # the beggining of an intersection, therefore the
+        # variation in angle is small
+        next_next_waypoint = next_waypoint.next(3.0)[0]
+        link = _compute_connection(current_waypoint, next_next_waypoint)
+        options.append(link)
+
+    return options
+
+
+def _compute_connection(current_waypoint, next_waypoint, threshold=35):
+    """
+    Compute the type of topological connection between an active waypoint (current_waypoint) and a target waypoint
+    (next_waypoint).
+
+    :param current_waypoint: active waypoint
+    :param next_waypoint: target waypoint
+    :return: the type of topological connection encoded as a RoadOption enum:
+             RoadOption.STRAIGHT
+             RoadOption.LEFT
+             RoadOption.RIGHT
+    """
+    n = next_waypoint.transform.rotation.yaw
+    n = n % 360.0
+
+    c = current_waypoint.transform.rotation.yaw
+    c = c % 360.0
+
+    diff_angle = (n - c) % 180.0
+    if diff_angle < threshold or diff_angle > (180 - threshold):
+        return RoadOption.STRAIGHT
+    elif diff_angle > 90.0:
+        return RoadOption.LEFT
+    else:
+        return RoadOption.RIGHT
+
+----
+navigation/basic_agent.py
+# Copyright (c) # Copyright (c) 2018-2020 CVC.
+#
+# This work is licensed under the terms of the MIT license.
+# For a copy, see <https://opensource.org/licenses/MIT>.
+
+"""
+This module implements an agent that roams around a track following random
+waypoints and avoiding other vehicles. The agent also responds to traffic lights.
+It can also make use of the global route planner to follow a specifed route
+"""
+
+import carla
+from shapely.geometry import Polygon
+
+from navigation.local_planner import LocalPlanner, RoadOption
+from navigation.global_route_planner import GlobalRoutePlanner
+from tools.misc import (get_speed, is_within_distance,
+                               get_trafficlight_trigger_location,
+                               compute_distance)
+
+
+class BasicAgent(object):
+    """
+    BasicAgent implements an agent that navigates the scene.
+    This agent respects traffic lights and other vehicles, but ignores stop signs.
+    It has several functions available to specify the route that the agent must follow,
+    as well as to change its parameters in case a different driving mode is desired.
+    """
+
+    def __init__(self, vehicle, target_speed=20, opt_dict={}, map_inst=None, grp_inst=None):
+        """
+        Initialization the agent paramters, the local and the global planner.
+
+            :param vehicle: actor to apply to agent logic onto
+            :param target_speed: speed (in Km/h) at which the vehicle will move
+            :param opt_dict: dictionary in case some of its parameters want to be changed.
+                This also applies to parameters related to the LocalPlanner.
+            :param map_inst: carla.Map instance to avoid the expensive call of getting it.
+            :param grp_inst: GlobalRoutePlanner instance to avoid the expensive call of getting it.
+
+        """
+        self._vehicle = vehicle
+        self._world = self._vehicle.get_world()
+        if map_inst:
+            if isinstance(map_inst, carla.Map):
+                self._map = map_inst
+            else:
+                print("Warning: Ignoring the given map as it is not a 'carla.Map'")
+                self._map = self._world.get_map()
+        else:
+            self._map = self._world.get_map()
+        self._last_traffic_light = None
+
+        # Base parameters
+        self._ignore_traffic_lights = False
+        self._ignore_stop_signs = False
+        self._ignore_vehicles = False
+        self._use_bbs_detection = False
+        self._target_speed = target_speed
+        self._sampling_resolution = 2.0
+        self._base_tlight_threshold = 5.0  # meters
+        self._base_vehicle_threshold = 5.0  # meters
+        self._speed_ratio = 1
+        self._max_brake = 0.5
+        self._offset = 0
+
+        # Change parameters according to the dictionary
+        opt_dict['target_speed'] = target_speed
+        if 'ignore_traffic_lights' in opt_dict:
+            self._ignore_traffic_lights = opt_dict['ignore_traffic_lights']
+        if 'ignore_stop_signs' in opt_dict:
+            self._ignore_stop_signs = opt_dict['ignore_stop_signs']
+        if 'ignore_vehicles' in opt_dict:
+            self._ignore_vehicles = opt_dict['ignore_vehicles']
+        if 'use_bbs_detection' in opt_dict:
+            self._use_bbs_detection = opt_dict['use_bbs_detection']
+        if 'sampling_resolution' in opt_dict:
+            self._sampling_resolution = opt_dict['sampling_resolution']
+        if 'base_tlight_threshold' in opt_dict:
+            self._base_tlight_threshold = opt_dict['base_tlight_threshold']
+        if 'base_vehicle_threshold' in opt_dict:
+            self._base_vehicle_threshold = opt_dict['base_vehicle_threshold']
+        if 'detection_speed_ratio' in opt_dict:
+            self._speed_ratio = opt_dict['detection_speed_ratio']
+        if 'max_brake' in opt_dict:
+            self._max_brake = opt_dict['max_brake']
+        if 'offset' in opt_dict:
+            self._offset = opt_dict['offset']
+
+        # Initialize the planners
+        self._local_planner = LocalPlanner(self._vehicle, opt_dict=opt_dict, map_inst=self._map)
+        if grp_inst:
+            if isinstance(grp_inst, GlobalRoutePlanner):
+                self._global_planner = grp_inst
+            else:
+                print("Warning: Ignoring the given map as it is not a 'carla.Map'")
+                self._global_planner = GlobalRoutePlanner(self._map, self._sampling_resolution)
+        else:
+            self._global_planner = GlobalRoutePlanner(self._map, self._sampling_resolution)
+
+        # Get the static elements of the scene
+        self._lights_list = self._world.get_actors().filter("*traffic_light*")
+        self._lights_map = {}  # Dictionary mapping a traffic light to a wp corrspoing to its trigger volume location
+
+    def add_emergency_stop(self, control):
+        """
+        Overwrites the throttle a brake values of a control to perform an emergency stop.
+        The steering is kept the same to avoid going out of the lane when stopping during turns
+
+            :param speed (carl.VehicleControl): control to be modified
+        """
+        control.throttle = 0.0
+        control.brake = self._max_brake
+        control.hand_brake = False
+        return control
+
+    def set_target_speed(self, speed):
+        """
+        Changes the target speed of the agent
+            :param speed (float): target speed in Km/h
+        """
+        self._target_speed = speed
+        self._local_planner.set_speed(speed)
+
+    def follow_speed_limits(self, value=True):
+        """
+        If active, the agent will dynamically change the target speed according to the speed limits
+
+            :param value (bool): whether or not to activate this behavior
+        """
+        self._local_planner.follow_speed_limits(value)
+
+    def get_local_planner(self):
+        """Get method for protected member local planner"""
+        return self._local_planner
+
+    def get_global_planner(self):
+        """Get method for protected member local planner"""
+        return self._global_planner
+
+    def set_destination(self, end_location, start_location=None):
+        """
+        This method creates a list of waypoints between a starting and ending location,
+        based on the route returned by the global router, and adds it to the local planner.
+        If no starting location is passed, the vehicle local planner's target location is chosen,
+        which corresponds (by default), to a location about 5 meters in front of the vehicle.
+
+            :param end_location (carla.Location): final location of the route
+            :param start_location (carla.Location): starting location of the route
+        """
+        if not start_location:
+            start_location = self._local_planner.target_waypoint.transform.location
+            clean_queue = True
+        else:
+            start_location = self._vehicle.get_location()
+            clean_queue = False
+
+        start_waypoint = self._map.get_waypoint(start_location)
+        end_waypoint = self._map.get_waypoint(end_location)
+
+        route_trace = self.trace_route(start_waypoint, end_waypoint)
+        self._local_planner.set_global_plan(route_trace, clean_queue=clean_queue)
+
+    def set_global_plan(self, plan, stop_waypoint_creation=True, clean_queue=True):
+        """
+        Adds a specific plan to the agent.
+
+            :param plan: list of [carla.Waypoint, RoadOption] representing the route to be followed
+            :param stop_waypoint_creation: stops the automatic random creation of waypoints
+            :param clean_queue: resets the current agent's plan
+        """
+        self._local_planner.set_global_plan(
+            plan,
+            stop_waypoint_creation=stop_waypoint_creation,
+            clean_queue=clean_queue
+        )
+
+    def trace_route(self, start_waypoint, end_waypoint):
+        """
+        Calculates the shortest route between a starting and ending waypoint.
+
+            :param start_waypoint (carla.Waypoint): initial waypoint
+            :param end_waypoint (carla.Waypoint): final waypoint
+        """
+        start_location = start_waypoint.transform.location
+        end_location = end_waypoint.transform.location
+        return self._global_planner.trace_route(start_location, end_location)
+
+    def run_step(self):
+        """Execute one step of navigation."""
+        hazard_detected = False
+
+        # Retrieve all relevant actors
+        vehicle_list = self._world.get_actors().filter("*vehicle*")
+
+        vehicle_speed = get_speed(self._vehicle) / 3.6
+
+        # Check for possible vehicle obstacles
+        max_vehicle_distance = self._base_vehicle_threshold + self._speed_ratio * vehicle_speed
+        affected_by_vehicle, _, _ = self._vehicle_obstacle_detected(vehicle_list, max_vehicle_distance)
+        if affected_by_vehicle:
+            hazard_detected = True
+
+        # Check if the vehicle is affected by a red traffic light
+        max_tlight_distance = self._base_tlight_threshold + self._speed_ratio * vehicle_speed
+        affected_by_tlight, _ = self._affected_by_traffic_light(self._lights_list, max_tlight_distance)
+        if affected_by_tlight:
+            hazard_detected = True
+
+        control = self._local_planner.run_step()
+        if hazard_detected:
+            control = self.add_emergency_stop(control)
+
+        return control
+
+    def done(self):
+        """Check whether the agent has reached its destination."""
+        return self._local_planner.done()
+
+    def ignore_traffic_lights(self, active=True):
+        """(De)activates the checks for traffic lights"""
+        self._ignore_traffic_lights = active
+
+    def ignore_stop_signs(self, active=True):
+        """(De)activates the checks for stop signs"""
+        self._ignore_stop_signs = active
+
+    def ignore_vehicles(self, active=True):
+        """(De)activates the checks for stop signs"""
+        self._ignore_vehicles = active
+
+    def set_offset(self, offset):
+        """Sets an offset for the vehicle"""
+        self._local_planner.set_offset(offset)
+
+    def lane_change(self, direction, same_lane_time=0, other_lane_time=0, lane_change_time=2):
+        """
+        Changes the path so that the vehicle performs a lane change.
+        Use 'direction' to specify either a 'left' or 'right' lane change,
+        and the other 3 fine tune the maneuver
+        """
+        speed = self._vehicle.get_velocity().length()
+        path = self._generate_lane_change_path(
+            self._map.get_waypoint(self._vehicle.get_location()),
+            direction,
+            same_lane_time * speed,
+            other_lane_time * speed,
+            lane_change_time * speed,
+            False,
+            1,
+            self._sampling_resolution
+        )
+        if not path:
+            print("WARNING: Ignoring the lane change as no path was found")
+
+        self.set_global_plan(path)
+
+    def _affected_by_traffic_light(self, lights_list=None, max_distance=None):
+        """
+        Method to check if there is a red light affecting the vehicle.
+
+            :param lights_list (list of carla.TrafficLight): list containing TrafficLight objects.
+                If None, all traffic lights in the scene are used
+            :param max_distance (float): max distance for traffic lights to be considered relevant.
+                If None, the base threshold value is used
+        """
+        if self._ignore_traffic_lights:
+            return (False, None)
+
+        if not lights_list:
+            lights_list = self._world.get_actors().filter("*traffic_light*")
+
+        if not max_distance:
+            max_distance = self._base_tlight_threshold
+
+        if self._last_traffic_light:
+            if self._last_traffic_light.state != carla.TrafficLightState.Red:
+                self._last_traffic_light = None
+            else:
+                return (True, self._last_traffic_light)
+
+        ego_vehicle_location = self._vehicle.get_location()
+        ego_vehicle_waypoint = self._map.get_waypoint(ego_vehicle_location)
+
+        for traffic_light in lights_list:
+            if traffic_light.id in self._lights_map:
+                trigger_wp = self._lights_map[traffic_light.id]
+            else:
+                trigger_location = get_trafficlight_trigger_location(traffic_light)
+                trigger_wp = self._map.get_waypoint(trigger_location)
+                self._lights_map[traffic_light.id] = trigger_wp
+
+            if trigger_wp.transform.location.distance(ego_vehicle_location) > max_distance:
+                continue
+
+            if trigger_wp.road_id != ego_vehicle_waypoint.road_id:
+                continue
+
+            ve_dir = ego_vehicle_waypoint.transform.get_forward_vector()
+            wp_dir = trigger_wp.transform.get_forward_vector()
+            dot_ve_wp = ve_dir.x * wp_dir.x + ve_dir.y * wp_dir.y + ve_dir.z * wp_dir.z
+
+            if dot_ve_wp < 0:
+                continue
+
+            if traffic_light.state != carla.TrafficLightState.Red:
+                continue
+
+            if is_within_distance(trigger_wp.transform, self._vehicle.get_transform(), max_distance, [0, 90]):
+                self._last_traffic_light = traffic_light
+                return (True, traffic_light)
+
+        return (False, None)
+
+    def _vehicle_obstacle_detected(self, vehicle_list=None, max_distance=None, up_angle_th=90, low_angle_th=0, lane_offset=0):
+        """
+        Method to check if there is a vehicle in front of the agent blocking its path.
+
+            :param vehicle_list (list of carla.Vehicle): list contatining vehicle objects.
+                If None, all vehicle in the scene are used
+            :param max_distance: max freespace to check for obstacles.
+                If None, the base threshold value is used
+        """
+        def get_route_polygon():
+            route_bb = []
+            extent_y = self._vehicle.bounding_box.extent.y
+            r_ext = extent_y + self._offset
+            l_ext = -extent_y + self._offset
+            r_vec = ego_transform.get_right_vector()
+            p1 = ego_location + carla.Location(r_ext * r_vec.x, r_ext * r_vec.y)
+            p2 = ego_location + carla.Location(l_ext * r_vec.x, l_ext * r_vec.y)
+            route_bb.extend([[p1.x, p1.y, p1.z], [p2.x, p2.y, p2.z]])
+
+            for wp, _ in self._local_planner.get_plan():
+                if ego_location.distance(wp.transform.location) > max_distance:
+                    break
+
+                r_vec = wp.transform.get_right_vector()
+                p1 = wp.transform.location + carla.Location(r_ext * r_vec.x, r_ext * r_vec.y)
+                p2 = wp.transform.location + carla.Location(l_ext * r_vec.x, l_ext * r_vec.y)
+                route_bb.extend([[p1.x, p1.y, p1.z], [p2.x, p2.y, p2.z]])
+
+            # Two points don't create a polygon, nothing to check
+            if len(route_bb) < 3:
+                return None
+
+            return Polygon(route_bb)
+
+        if self._ignore_vehicles:
+            return (False, None, -1)
+
+        if not vehicle_list:
+            vehicle_list = self._world.get_actors().filter("*vehicle*")
+
+        if not max_distance:
+            max_distance = self._base_vehicle_threshold
+
+        ego_transform = self._vehicle.get_transform()
+        ego_location = ego_transform.location
+        ego_wpt = self._map.get_waypoint(ego_location)
+
+        # Get the right offset
+        if ego_wpt.lane_id < 0 and lane_offset != 0:
+            lane_offset *= -1
+
+        # Get the transform of the front of the ego
+        ego_front_transform = ego_transform
+        ego_front_transform.location += carla.Location(
+            self._vehicle.bounding_box.extent.x * ego_transform.get_forward_vector())
+
+        opposite_invasion = abs(self._offset) + self._vehicle.bounding_box.extent.y > ego_wpt.lane_width / 2
+        use_bbs = self._use_bbs_detection or opposite_invasion or ego_wpt.is_junction
+
+        # Get the route bounding box
+        route_polygon = get_route_polygon()
+
+        for target_vehicle in vehicle_list:
+            if target_vehicle.id == self._vehicle.id:
+                continue
+
+            target_transform = target_vehicle.get_transform()
+            if target_transform.location.distance(ego_location) > max_distance:
+                continue
+
+            target_wpt = self._map.get_waypoint(target_transform.location, lane_type=carla.LaneType.Any)
+
+            # General approach for junctions and vehicles invading other lanes due to the offset
+            if (use_bbs or target_wpt.is_junction) and route_polygon:
+
+                target_bb = target_vehicle.bounding_box
+                target_vertices = target_bb.get_world_vertices(target_vehicle.get_transform())
+                target_list = [[v.x, v.y, v.z] for v in target_vertices]
+                target_polygon = Polygon(target_list)
+
+                if route_polygon.intersects(target_polygon):
+                    return (True, target_vehicle, compute_distance(target_vehicle.get_location(), ego_location))
+
+            # Simplified approach, using only the plan waypoints (similar to TM)
+            else:
+
+                if target_wpt.road_id != ego_wpt.road_id or target_wpt.lane_id != ego_wpt.lane_id  + lane_offset:
+                    next_wpt = self._local_planner.get_incoming_waypoint_and_direction(steps=3)[0]
+                    if not next_wpt:
+                        continue
+                    if target_wpt.road_id != next_wpt.road_id or target_wpt.lane_id != next_wpt.lane_id  + lane_offset:
+                        continue
+
+                target_forward_vector = target_transform.get_forward_vector()
+                target_extent = target_vehicle.bounding_box.extent.x
+                target_rear_transform = target_transform
+                target_rear_transform.location -= carla.Location(
+                    x=target_extent * target_forward_vector.x,
+                    y=target_extent * target_forward_vector.y,
+                )
+
+                if is_within_distance(target_rear_transform, ego_front_transform, max_distance, [low_angle_th, up_angle_th]):
+                    return (True, target_vehicle, compute_distance(target_transform.location, ego_transform.location))
+
+        return (False, None, -1)
+
+    def _generate_lane_change_path(self, waypoint, direction='left', distance_same_lane=10,
+                                distance_other_lane=25, lane_change_distance=25,
+                                check=True, lane_changes=1, step_distance=2):
+        """
+        This methods generates a path that results in a lane change.
+        Use the different distances to fine-tune the maneuver.
+        If the lane change is impossible, the returned path will be empty.
+        """
+        distance_same_lane = max(distance_same_lane, 0.1)
+        distance_other_lane = max(distance_other_lane, 0.1)
+        lane_change_distance = max(lane_change_distance, 0.1)
+
+        plan = []
+        plan.append((waypoint, RoadOption.LANEFOLLOW))  # start position
+
+        option = RoadOption.LANEFOLLOW
+
+        # Same lane
+        distance = 0
+        while distance < distance_same_lane:
+            next_wps = plan[-1][0].next(step_distance)
+            if not next_wps:
+                return []
+            next_wp = next_wps[0]
+            distance += next_wp.transform.location.distance(plan[-1][0].transform.location)
+            plan.append((next_wp, RoadOption.LANEFOLLOW))
+
+        if direction == 'left':
+            option = RoadOption.CHANGELANELEFT
+        elif direction == 'right':
+            option = RoadOption.CHANGELANERIGHT
+        else:
+            # ERROR, input value for change must be 'left' or 'right'
+            return []
+
+        lane_changes_done = 0
+        lane_change_distance = lane_change_distance / lane_changes
+
+        # Lane change
+        while lane_changes_done < lane_changes:
+
+            # Move forward
+            next_wps = plan[-1][0].next(lane_change_distance)
+            if not next_wps:
+                return []
+            next_wp = next_wps[0]
+
+            # Get the side lane
+            if direction == 'left':
+                if check and str(next_wp.lane_change) not in ['Left', 'Both']:
+                    return []
+                side_wp = next_wp.get_left_lane()
+            else:
+                if check and str(next_wp.lane_change) not in ['Right', 'Both']:
+                    return []
+                side_wp = next_wp.get_right_lane()
+
+            if not side_wp or side_wp.lane_type != carla.LaneType.Driving:
+                return []
+
+            # Update the plan
+            plan.append((side_wp, option))
+            lane_changes_done += 1
+
+        # Other lane
+        distance = 0
+        while distance < distance_other_lane:
+            next_wps = plan[-1][0].next(step_distance)
+            if not next_wps:
+                return []
+            next_wp = next_wps[0]
+            distance += next_wp.transform.location.distance(plan[-1][0].transform.location)
+            plan.append((next_wp, RoadOption.LANEFOLLOW))
+
+        return plan
+
+----
+navigation/behavior_agent.py
+# Copyright (c) # Copyright (c) 2018-2020 CVC.
+#
+# This work is licensed under the terms of the MIT license.
+# For a copy, see <https://opensource.org/licenses/MIT>.
+
+
+""" This module implements an agent that roams around a track following random
+waypoints and avoiding other vehicles. The agent also responds to traffic lights,
+traffic signs, and has different possible configurations. """
+
+import random
+import numpy as np
+import carla
+from navigation.basic_agent import BasicAgent
+from navigation.local_planner import RoadOption
+from navigation.behavior_types import Cautious, Aggressive, Normal
+
+from tools.misc import get_speed, positive, is_within_distance, compute_distance
+
+class BehaviorAgent(BasicAgent):
+    """
+    BehaviorAgent implements an agent that navigates scenes to reach a given
+    target destination, by computing the shortest possible path to it.
+    This agent can correctly follow traffic signs, speed limitations,
+    traffic lights, while also taking into account nearby vehicles. Lane changing
+    decisions can be taken by analyzing the surrounding environment such as tailgating avoidance.
+    Adding to these are possible behaviors, the agent can also keep safety distance
+    from a car in front of it by tracking the instantaneous time to collision
+    and keeping it in a certain range. Finally, different sets of behaviors
+    are encoded in the agent, from cautious to a more aggressive ones.
+    """
+
+    def __init__(self, vehicle, behavior='normal', opt_dict={}, map_inst=None, grp_inst=None):
+        """
+        Constructor method.
+
+            :param vehicle: actor to apply to local planner logic onto
+            :param behavior: type of agent to apply
+        """
+
+        super().__init__(vehicle, opt_dict=opt_dict, map_inst=map_inst, grp_inst=grp_inst)
+        self._look_ahead_steps = 0
+
+        # Vehicle information
+        self._speed = 0
+        self._speed_limit = 0
+        self._direction = None
+        self._incoming_direction = None
+        self._incoming_waypoint = None
+        self._min_speed = 5
+        self._behavior = None
+        self._sampling_resolution = 4.5
+
+        # Parameters for agent behavior
+        if behavior == 'cautious':
+            self._behavior = Cautious()
+
+        elif behavior == 'normal':
+            self._behavior = Normal()
+
+        elif behavior == 'aggressive':
+            self._behavior = Aggressive()
+
+    def _update_information(self):
+        """
+        This method updates the information regarding the ego
+        vehicle based on the surrounding world.
+        """
+        self._speed = get_speed(self._vehicle)
+        self._speed_limit = self._vehicle.get_speed_limit()
+        self._local_planner.set_speed(self._speed_limit)
+        self._direction = self._local_planner.target_road_option
+        if self._direction is None:
+            self._direction = RoadOption.LANEFOLLOW
+
+        self._look_ahead_steps = int((self._speed_limit) / 10)
+
+        self._incoming_waypoint, self._incoming_direction = self._local_planner.get_incoming_waypoint_and_direction(
+            steps=self._look_ahead_steps)
+        if self._incoming_direction is None:
+            self._incoming_direction = RoadOption.LANEFOLLOW
+
+    def traffic_light_manager(self):
+        """
+        This method is in charge of behaviors for red lights.
+        """
+        actor_list = self._world.get_actors()
+        lights_list = actor_list.filter("*traffic_light*")
+        affected, _ = self._affected_by_traffic_light(lights_list)
+
+        return affected
+
+    def _tailgating(self, waypoint, vehicle_list):
+        """
+        This method is in charge of tailgating behaviors.
+
+            :param location: current location of the agent
+            :param waypoint: current waypoint of the agent
+            :param vehicle_list: list of all the nearby vehicles
+        """
+
+        left_turn = waypoint.left_lane_marking.lane_change
+        right_turn = waypoint.right_lane_marking.lane_change
+
+        left_wpt = waypoint.get_left_lane()
+        right_wpt = waypoint.get_right_lane()
+
+        behind_vehicle_state, behind_vehicle, _ = self._vehicle_obstacle_detected(vehicle_list, max(
+            self._behavior.min_proximity_threshold, self._speed_limit / 2), up_angle_th=180, low_angle_th=160)
+        if behind_vehicle_state and self._speed < get_speed(behind_vehicle):
+            if (right_turn == carla.LaneChange.Right or right_turn ==
+                    carla.LaneChange.Both) and waypoint.lane_id * right_wpt.lane_id > 0 and right_wpt.lane_type == carla.LaneType.Driving:
+                new_vehicle_state, _, _ = self._vehicle_obstacle_detected(vehicle_list, max(
+                    self._behavior.min_proximity_threshold, self._speed_limit / 2), up_angle_th=180, lane_offset=1)
+                if not new_vehicle_state:
+                    print("Tailgating, moving to the right!")
+                    end_waypoint = self._local_planner.target_waypoint
+                    self._behavior.tailgate_counter = 200
+                    self.set_destination(end_waypoint.transform.location,
+                                         right_wpt.transform.location)
+            elif left_turn == carla.LaneChange.Left and waypoint.lane_id * left_wpt.lane_id > 0 and left_wpt.lane_type == carla.LaneType.Driving:
+                new_vehicle_state, _, _ = self._vehicle_obstacle_detected(vehicle_list, max(
+                    self._behavior.min_proximity_threshold, self._speed_limit / 2), up_angle_th=180, lane_offset=-1)
+                if not new_vehicle_state:
+                    print("Tailgating, moving to the left!")
+                    end_waypoint = self._local_planner.target_waypoint
+                    self._behavior.tailgate_counter = 200
+                    self.set_destination(end_waypoint.transform.location,
+                                         left_wpt.transform.location)
+
+    def collision_and_car_avoid_manager(self, waypoint):
+        """
+        This module is in charge of warning in case of a collision
+        and managing possible tailgating chances.
+
+            :param location: current location of the agent
+            :param waypoint: current waypoint of the agent
+            :return vehicle_state: True if there is a vehicle nearby, False if not
+            :return vehicle: nearby vehicle
+            :return distance: distance to nearby vehicle
+        """
+
+        vehicle_list = self._world.get_actors().filter("*vehicle*")
+        def dist(v): return v.get_location().distance(waypoint.transform.location)
+        vehicle_list = [v for v in vehicle_list if dist(v) < 45 and v.id != self._vehicle.id]
+
+        if self._direction == RoadOption.CHANGELANELEFT:
+            vehicle_state, vehicle, distance = self._vehicle_obstacle_detected(
+                vehicle_list, max(
+                    self._behavior.min_proximity_threshold, self._speed_limit / 2), up_angle_th=180, lane_offset=-1)
+        elif self._direction == RoadOption.CHANGELANERIGHT:
+            vehicle_state, vehicle, distance = self._vehicle_obstacle_detected(
+                vehicle_list, max(
+                    self._behavior.min_proximity_threshold, self._speed_limit / 2), up_angle_th=180, lane_offset=1)
+        else:
+            vehicle_state, vehicle, distance = self._vehicle_obstacle_detected(
+                vehicle_list, max(
+                    self._behavior.min_proximity_threshold, self._speed_limit / 3), up_angle_th=30)
+
+            # Check for tailgating
+            if not vehicle_state and self._direction == RoadOption.LANEFOLLOW \
+                    and not waypoint.is_junction and self._speed > 10 \
+                    and self._behavior.tailgate_counter == 0:
+                self._tailgating(waypoint, vehicle_list)
+
+        return vehicle_state, vehicle, distance
+
+    def pedestrian_avoid_manager(self, waypoint):
+        """
+        This module is in charge of warning in case of a collision
+        with any pedestrian.
+
+            :param location: current location of the agent
+            :param waypoint: current waypoint of the agent
+            :return vehicle_state: True if there is a walker nearby, False if not
+            :return vehicle: nearby walker
+            :return distance: distance to nearby walker
+        """
+
+        walker_list = self._world.get_actors().filter("*walker.pedestrian*")
+        def dist(w): return w.get_location().distance(waypoint.transform.location)
+        walker_list = [w for w in walker_list if dist(w) < 10]
+
+        if self._direction == RoadOption.CHANGELANELEFT:
+            walker_state, walker, distance = self._vehicle_obstacle_detected(walker_list, max(
+                self._behavior.min_proximity_threshold, self._speed_limit / 2), up_angle_th=90, lane_offset=-1)
+        elif self._direction == RoadOption.CHANGELANERIGHT:
+            walker_state, walker, distance = self._vehicle_obstacle_detected(walker_list, max(
+                self._behavior.min_proximity_threshold, self._speed_limit / 2), up_angle_th=90, lane_offset=1)
+        else:
+            walker_state, walker, distance = self._vehicle_obstacle_detected(walker_list, max(
+                self._behavior.min_proximity_threshold, self._speed_limit / 3), up_angle_th=60)
+
+        return walker_state, walker, distance
+
+    def car_following_manager(self, vehicle, distance, debug=False):
+        """
+        Module in charge of car-following behaviors when there's
+        someone in front of us.
+
+            :param vehicle: car to follow
+            :param distance: distance from vehicle
+            :param debug: boolean for debugging
+            :return control: carla.VehicleControl
+        """
+
+        vehicle_speed = get_speed(vehicle)
+        delta_v = max(1, (self._speed - vehicle_speed) / 3.6)
+        ttc = distance / delta_v if delta_v != 0 else distance / np.nextafter(0., 1.)
+
+        # Under safety time distance, slow down.
+        if self._behavior.safety_time > ttc > 0.0:
+            target_speed = min([
+                positive(vehicle_speed - self._behavior.speed_decrease),
+                self._behavior.max_speed,
+                self._speed_limit - self._behavior.speed_lim_dist])
+            self._local_planner.set_speed(target_speed)
+            control = self._local_planner.run_step(debug=debug)
+
+        # Actual safety distance area, try to follow the speed of the vehicle in front.
+        elif 2 * self._behavior.safety_time > ttc >= self._behavior.safety_time:
+            target_speed = min([
+                max(self._min_speed, vehicle_speed),
+                self._behavior.max_speed,
+                self._speed_limit - self._behavior.speed_lim_dist])
+            self._local_planner.set_speed(target_speed)
+            control = self._local_planner.run_step(debug=debug)
+
+        # Normal behavior.
+        else:
+            target_speed = min([
+                self._behavior.max_speed,
+                self._speed_limit - self._behavior.speed_lim_dist])
+            self._local_planner.set_speed(target_speed)
+            control = self._local_planner.run_step(debug=debug)
+
+        return control
+
+    def run_step(self, debug=False):
+        """
+        Execute one step of navigation.
+
+            :param debug: boolean for debugging
+            :return control: carla.VehicleControl
+        """
+        self._update_information()
+
+        control = None
+        if self._behavior.tailgate_counter > 0:
+            self._behavior.tailgate_counter -= 1
+
+        ego_vehicle_loc = self._vehicle.get_location()
+        ego_vehicle_wp = self._map.get_waypoint(ego_vehicle_loc)
+
+        # 1: Red lights and stops behavior
+        if self.traffic_light_manager():
+            return self.emergency_stop()
+
+        # 2.1: Pedestrian avoidance behaviors
+        walker_state, walker, w_distance = self.pedestrian_avoid_manager(ego_vehicle_wp)
+
+        if walker_state:
+            # Distance is computed from the center of the two cars,
+            # we use bounding boxes to calculate the actual distance
+            distance = w_distance - max(
+                walker.bounding_box.extent.y, walker.bounding_box.extent.x) - max(
+                    self._vehicle.bounding_box.extent.y, self._vehicle.bounding_box.extent.x)
+
+            # Emergency brake if the car is very close.
+            if distance < self._behavior.braking_distance:
+                return self.emergency_stop()
+
+        # 2.2: Car following behaviors
+        vehicle_state, vehicle, distance = self.collision_and_car_avoid_manager(ego_vehicle_wp)
+
+        if vehicle_state:
+            # Distance is computed from the center of the two cars,
+            # we use bounding boxes to calculate the actual distance
+            distance = distance - max(
+                vehicle.bounding_box.extent.y, vehicle.bounding_box.extent.x) - max(
+                    self._vehicle.bounding_box.extent.y, self._vehicle.bounding_box.extent.x)
+
+            # Emergency brake if the car is very close.
+            if distance < self._behavior.braking_distance:
+                return self.emergency_stop()
+            else:
+                control = self.car_following_manager(vehicle, distance)
+
+        # 3: Intersection behavior
+        elif self._incoming_waypoint.is_junction and (self._incoming_direction in [RoadOption.LEFT, RoadOption.RIGHT]):
+            target_speed = min([
+                self._behavior.max_speed,
+                self._speed_limit - 5])
+            self._local_planner.set_speed(target_speed)
+            control = self._local_planner.run_step(debug=debug)
+
+        # 4: Normal behavior
+        else:
+            target_speed = min([
+                self._behavior.max_speed,
+                self._speed_limit - self._behavior.speed_lim_dist])
+            self._local_planner.set_speed(target_speed)
+            control = self._local_planner.run_step(debug=debug)
+
+        return control
+
+    def emergency_stop(self):
+        """
+        Overwrites the throttle a brake values of a control to perform an emergency stop.
+        The steering is kept the same to avoid going out of the lane when stopping during turns
+
+            :param speed (carl.VehicleControl): control to be modified
+        """
+        control = carla.VehicleControl()
+        control.throttle = 0.0
+        control.brake = self._max_brake
+        control.hand_brake = False
+        return control
+
+----
+core_rl/__init__.py
+
+----
+core_rl/observation.py
+import gym
+import numpy as np
+
+class CarlaObservations():
+
+    def __init__(self, img_height, img_width):
+
+        self.img_height = img_height
+        self.img_width = img_width
+
+    def get_observation_space(self):
+        return gym.spaces.Box(low=0.0, high=255.0, shape=(self.img_height, self.img_width, 3), dtype=np.uint8)
+
+----
+core_rl/actions.py
+import gym
+import numpy as np
+import carla
+
+class CarlaActions():
+
+    def __init__(self, action_type='continuous'):
+
+        self.action_type = action_type
+
+        if self.action_type == 'carla-original':
+            self.discrete_actions = [[0., 0.], [-1.,0.], [-0.5,0.], [-0.25,0.], [0.25,0.], [0.5, 0.], [1.0, 0.], [0., -1.],
+                                        [0., -0.5], [0., -0.25], [0., 0.25], [0., 0.5], [0.,1.]]
+
+
+    def get_action_space(self):
+
+        if self.action_type == 'carla-original':
+            return gym.spaces.Discrete(len(self.discrete_actions))
+
+        elif self.action_type == 'continuous':
+            low = [0.0, -1.0]
+            high = [1.0, 1.0]
+            return gym.spaces.Box(low=np.array(low), high=np.array(high), dtype=np.float32)
+
+----
+tensorboard/PPO_1712166124_id1/config.json
+{
+    "algorithm": "PPO",
+    "algorithm_params": "{'learning_rate': 'lr_schedule(0.0001, 1e-06, 2)', 'gamma': '0.98', 'gae_lambda': '0.95', 'clip_range': '0.2', 'ent_coef': '0.05', 'n_epochs': '10', 'n_steps': '1024', 'policy_kwargs': \"{'activation_fn': <class 'torch.nn.modules.activation.ReLU'>, 'net_arch': [{'pi': [500, 300], 'vf': [500, 300]}]}\"}",
+    "action_smoothing": "0.75",
+    "reward_fn": "reward_fn5",
+    "reward_params": "{'early_stop': 'True', 'min_speed': '20.0', 'max_speed': '35.0', 'target_speed': '25.0', 'max_distance': '2.0', 'max_std_center_lane': '0.35', 'max_angle_center_lane': '90', 'penalty_reward': '-10'}",
+    "obs_sensor": "semantic",
+    "obs_res": "(160, 80)"
+}
+----
+tensorboard/PPO_1712166124_id1/progress.csv
+custom/mean_reward,custom/avg_speed,custom/routes_completed,custom/total_distance,custom/total_reward,custom/avg_center_dev,time/iterations,rollout/ep_len_mean,time/time_elapsed,time/total_timesteps,time/fps,rollout/ep_rew_mean,train/loss,train/n_updates,train/entropy_loss,train/value_loss,train/learning_rate,train/clip_fraction,train/explained_variance,train/policy_gradient_loss,train/approx_kl,train/std,train/clip_range
+[-0.25963157],[0.48197186],0.006153846153846154,1.1959897616761737,[-9.8659996],0.03785971571238295,,,,,,,,,,,,,,,,,
+[0.01387586],[1.92081955],0.011131725417439703,6.175881461007521,[0.67991695],0.08349865549257432,,,,,,,,,,,,,,,,,
+[0.02016404],[2.19849405],0.01195814648729447,7.648920589243062,[1.06869417],0.10966885494021736,,,,,,,,,,,,,,,,,
+-10.0,[-1.55047231e-07],0.001288659793814433,0.0003842162841465324,-20.0,2.4791806751550682e-05,,,,,,,,,,,,,,,,,
+[-0.27086353],[0.83885916],0.005698005698005698,1.9774486632959452,[-9.75108708],0.0553073084207328,,,,,,,,,,,,,,,,,
+[-0.16098176],[2.48878205],0.03819444444444445,10.208664714038605,[-9.98086935],0.14981951010229394,,,,,,,,,,,,,,,,,
+[0.00964075],[1.98750608],0.005173688100517369,6.937123132553097,[0.51095963],0.0988013597537843,,,,,,,,,,,,,,,,,
+[-0.45454546],[-1.21952421e-08],0.001226993865030675,0.0012987899826839566,[-10.00000001],7.223781364416327e-07,,,,,,,,,,,,,,,,,
+[0.0079266],[1.38915036],0.016548463356973995,6.61071714933496,[0.57071486],0.12098661230341408,,,,,,,,,,,,,,,,,
+[-3.33333333],[-1.37628213e-08],0.0017857142857142857,0.0006919098377693444,[-10.],1.6810369645923874e-06,,,,,,,,,,,,,,,,,
+[-0.18518519],[1.17406413],0.018115942028985508,4.171856352651957,[-10.],0.08418069900847781,,,,,,,,,,,,,,,,,
+-10.0,[3.99009189e-09],0.0012165450121654502,0.0003845977771561593,-20.0,9.767711134139358e-06,,,,,,,,,,,,,,,,,
+[0.],[2.50365832],0.013580246913580247,10.723903157399036,[0.],0.12051836052072246,,,,,,,,,,,,,,,,,
+[-1.],[6.86942393e-09],0.0031545741324921135,0.0012578582391142845,[-10.],4.546716775397086e-06,,,,,,,,,,,,,,,,,
+[-0.20281215],[1.88760347],0.015873015873015872,6.058132921316428,[-9.93779538],0.0880079886382632,,,,,,,,,,,,,,,,,
+[-0.31906288],[1.23362733],0.00847457627118644,2.4528776539082173,[-9.89094939],0.08786967637703304,,,,,,,,,,,,,,,,,
+[0.00116359],[1.96113924],0.015748031496062992,8.371081176661392,[0.07446967],0.2541565231831321,,,,,,,,,,,,,,,,,
+[-0.90909091],[-1.75309528e-09],0.01282051282051282,0.0012746810680255294,[-10.],4.734668678372091e-06,,,,,,,,,,,,,,,,,
+-10.0,[-1.07364039e-10],0.0006523157208088715,0.00038494111504405737,-20.0,1.4551913175311624e-08,,,,,,,,,,,,,,,,,
+[-0.20408163],[1.32875454],0.010526315789473684,4.309682745602913,[-10.],0.15180682838968876,,,,,,,,,,,,,,,,,
+[0.],[0.62208067],0.0020512820512820513,1.2914170931617264,[0.],0.05371174724302626,,,,,,,,,,,,,,,,,
+[0.00599901],[1.827827],0.008706467661691543,6.362525570264552,[0.31794762],0.06791924276768814,,,,,,,,,,,,,,,,,
+-10.0,[9.81602286e-09],0.0013351134846461949,0.000385093706427142,-20.0,2.5326367224486328e-05,,,,,,,,,,,,,,,,,
+[0.03625231],[2.366256],0.01361573373676248,8.45597359596286,[1.95762448],0.09282623933021866,,,,,,,,,,,,,,,,,
+[-0.13275662],[2.75657743],0.019374068554396422,13.165537022228818,[-9.55847637],0.15018666655387924,,,,,,,,,,,,,,,,,
+[-0.39465168],[1.10284833],0.004464285714285714,1.7667083798442036,[-9.86629201],0.08003223851349132,,,,,,,,,,,,,,,,,
+[0.02591977],[1.67099719],0.0057692307692307696,5.269253564445535,[1.24414883],0.07029553584943418,,,,,,,,,,,,,,,,,
+[-0.37037037],[-4.38079794e-09],0.0015082956259426848,0.0013016890734434128,[-10.00000001],3.0371354823680238e-05,,,,,,,,,,,,,,,,,
+,,,,,,1,36.142857142857146,37,1024,27,-6.158106821428572,,,,,,,,,,,
+[-0.1734084],[0.96242586],0.02631578947368421,3.5553096739167813,[-9.71087045],0.10920134831521026,,,,,,,0.2927546501159668,10,-2.8418169632554053,2.8350759536027907,9.9797351809024e-05,0.044921875,0.007298290729522705,-0.007051996985683218,0.005594301,1.0047805309295654,0.2
+[-0.12770624],[1.92685001],0.017035775127768313,9.307845022092806,[-9.32255544],0.12790477592514893,,,,,,,,,,,,,,,,,
+[0.02826394],[2.30775774],0.010416666666666666,6.201025978662074,[1.15882169],0.07912407824649913,,,,,,,,,,,,,,,,,
+[-0.19259577],[1.67919517],0.0084985835694051,5.34978811518522,[-9.24459719],0.12032466308055055,,,,,,,,,,,,,,,,,
+[0.],[1.81980843],0.007399577167019027,6.797299949947046,[0.],0.13213021961092844,,,,,,,,,,,,,,,,,
+[-0.55555556],[8.71136246e-09],0.0015408320493066256,0.001300010655540973,[-9.99999999],3.1509901609278664e-05,,,,,,,,,,,,,,,,,
+[-0.15367062],[2.30179454],0.026737967914438502,9.141281264543068,[-9.22023713],0.10345358453979969,,,,,,,,,,,,,,,,,
+[0.01376925],[1.54562131],0.017994858611825194,6.426567188260378,[0.86746273],0.08442373908196624,,,,,,,,,,,,,,,,,
+[-0.83333333],[-1.02041486e-08],0.003436426116838488,0.0012813567591365427,[-10.],1.5966940781071253e-05,,,,,,,,,,,,,,,,,
+[0.02037387],[1.18900971],0.0023942537909018356,3.0883138405624777,[0.81495495],0.04301568939004112,,,,,,,,,,,,,,,,,
+[-0.28571429],[2.0345664e-10],0.0016051364365971107,0.00130264280596748,[-10.],2.7450499976256085e-05,,,,,,,,,,,,,,,,,
+[-0.1992281],[1.08086408],0.00641025641025641,3.3989455701957922,[-9.56294904],0.0900447802606913,,,,,,,,,,,,,,,,,
+[0.01034307],[1.67682312],0.011737089201877934,4.679255076189293,[0.43440902],0.09161177525709167,,,,,,,,,,,,,,,,,
+[-0.14285714],[1.81255317],0.008130081300813009,8.361331469204742,[-10.],0.08793529076577059,,,,,,,,,,,,,,,,,
+[0.01310816],[3.36196695],0.04238921001926782,22.125571051205043,[1.29770804],0.3114698084286054,,,,,,,,,,,,,,,,,
+-10.0,[-1.75231082e-08],0.002232142857142857,0.00038581847911700606,-20.0,5.858018926135044e-06,,,,,,,,,,,,,,,,,
+[-0.11806676],[1.68575877],0.01949317738791423,9.159776154323481,[-9.68147402],0.08396310622973749,,,,,,,,,,,,,,,,,
+[-0.1343658],[1.72724783],0.039301310043668124,8.076942362909904,[-9.53997193],0.07762776651684075,,,,,,,,,,,,,,,,,
+[0.],[1.83272677],0.009186351706036745,5.926597386744106,[0.],0.10318423233950914,,,,,,,,,,,,,,,,,
+[-0.38461538],[2.06759955e-10],0.001851851851851852,0.0013037490716669708,[-10.],3.2790116996193205e-06,,,,,,,,,,,,,,,,,
+[0.0133929],[1.83232589],0.00931098696461825,4.606065533153014,[0.50893016],0.08950648153675363,,,,,,,,,,,,,,,,,
+,,,,,,2,41.244897959183675,69,2048,29,-5.9923950612244905,,,,,,,,,,,
+
+----
+tensorboard/PPO_1712166124_id1/events.out.tfevents.1712166124.officepc-MS-7D90.323339.0
+H       H	r:;eA
+brain.Event:2R.
+,tensorboard.summary.writer.event_file_writerl`+       K	;eA%*
+
+custom/avg_center_dev=/-       <A	S;eA%* 
+
+custom/routes_completed4;2WJ+       K	;eA%*
+
+custom/total_distance1?^5       ۼ	Y;eA*
+
+_hparams_/experimentJ
+
+hparams"
+	algorithm "
+algorithm_params "
+action_smoothing "
+	reward_fn "
+
+reward_params "
+
+obs_sensor "
+obs_res *
+rollout/ep_len_mean*
+train/value_loss      	Y;eA*
+
+_hparams_/session_start_infoJ
+
+hparams
+
+action_smoothing0.75
+
+obs_res	(160, 80)
+
+
+reward_params{'early_stop': 'True', 'min_speed': '20.0', 'max_speed': '35.0', 'target_speed': '25.0', 'max_distance': '2.0', 'max_std_center_lane': '0.35', 'max_angle_center_lane': '90', 'penalty_reward': '-10'}
+
+
+obs_sensor
+semantic
+
+	reward_fn
+reward_fn5
+
+	algorithmPPO
+
+algorithm_params{'learning_rate': 'lr_schedule(0.0001, 1e-06, 2)', 'gamma': '0.98', 'gae_lambda': '0.95', 'clip_range': '0.2', 'ent_coef': '0.05', 'n_epochs': '10', 'n_steps': '1024', 'policy_kwargs': "{'activation_fn': <class 'torch.nn.modules.activation.ReLU'>, 'net_arch': [{'pi': [500, 300], 'vf': [500, 300]}]}"}SK,S<       ȷR	Y;eA*1
+/
+_hparams_/session_end_infoJ
+
+hparams">+       K	'<eAU*
+
+custom/avg_center_devX=!-       <A	<eAU* 
+
+custom/routes_completeda6<cv+       K	ܩ<eAU*
+
+custom/total_distanceҠ@01Ȯ,       E	Ĭv<eA*
+
+custom/avg_center_dev=0.       W	Qv<eA* 
+
+custom/routes_completedC<=n,       E	qv<eA*
+
+custom/total_distance@8^d,       E	u<eA*
+
+custom/avg_center_dev 7~p!)       7_ 	Bv<eA*
+
+custom/mean_reward   =Z.       W	cv<eA* 
+
+custom/routes_completed?:c,       E	}v<eA*
+
+custom/total_distancep9ev*       	v<eA*
+
+custom/total_reward  P,       E	$<eA*
+
+custom/avg_center_devb=w	.       W	<eA* 
+
+custom/routes_completedV;oG,       E	<eA*
+
+custom/total_distance
+?^,       E	Za=eA*
+
+custom/avg_center_devIj>$n.       W	5[a=eA* 
+
+custom/routes_completedq=,       E	\[a=eA*
+
+custom/total_distanceV#A갋%,       E	=eA*
+
+custom/avg_center_dev^X=P.       W	=eA* 
+
+custom/routes_completed;ԯTx,       E	=eA*
+
+custom/total_distance@^,       E	T
+>eA*
+
+custom/avg_center_devsA5G.       W	
+>eA* 
+
+custom/routes_completedӠ:[;,       E	
+>eA*
+
+custom/total_distance)<:vW ,       E	}>eA*
+
+custom/avg_center_dev=c.       W	\}>eA* 
+
+custom/routes_completed<&iV,       E	}}>eA*
+
+custom/total_distance@O,       E	>eA*
+
+custom/avg_center_dev5oj|.       W	'>eA* 
+
+custom/routes_completed:LF1,       E	{>eA*
+
+custom/total_distanceHa5:,       E	VB?eA*
+
+custom/avg_center_devf=ү.       W	B?eA* 
+
+custom/routes_completedg<,       E	B?eA*
+
+custom/total_distance@v,       E	??eA*
+
+custom/avg_center_dev #7)       7_ 	??eA*
+
+custom/mean_reward   {D.       W	9??eA* 
+
+custom/routes_completedzt:,,       E	T??eA*
+
+custom/total_distanceף9H
+*       	??eA*
+
+custom/total_reward  _<,       E	?eA*
+
+custom/avg_center_devU=ŚF.       W	%?eA* 
+
+custom/routes_completed^<*,       E	E?eA*
+
+custom/total_distance+AL,,       E	?eA*
+
+custom/avg_center_dev 69.       W	b?eA* 
+
+custom/routes_completedN;97,       E	?eA*
+
+custom/total_distanceޤ:JM,       E	9@eA*
+
+custom/avg_center_dev==.       W	}9@eA* 
+
+custom/routes_completed!<wT,       E	9@eA*
+
+custom/total_distance:@r<,       E	@eA*
+
+custom/avg_center_dev=Iv.       W	@eA* 
+
+custom/routes_completed
+<cu,       E	@eA*
+
+custom/total_distance@P,       E	^@eA*
+
+custom/avg_center_dev >.       W	@eA* 
+
+custom/routes_completed<Ndr,       E	
+@eA*
+
+custom/total_distanceA?,       E	8AeA*
+
+custom/avg_center_devޞ6Ch.       W	8AeA* 
+
+custom/routes_completed!
+R<,       E	8AeA*
+
+custom/total_distance3:,       E	 cAeA*
+
+custom/avg_center_devy2h%)       7_ 	S!cAeA*
+
+custom/mean_reward   .       W	x!cAeA* 
+
+custom/routes_completed+ +:|,       E	!cAeA*
+
+custom/total_distance9đm*       	!cAeA*
+
+custom/total_reward  G9R,       E	pWAeA*
+
+custom/avg_center_dev@s>4.       W	XAeA* 
+
+custom/routes_completedv,<h'p,       E	&XAeA*
+
+custom/total_distance@/,       E	͛BeA*
+
+custom/avg_center_dev \=9C.       W	pBeA* 
+
+custom/routes_completedn;BR,       E	BeA*
+
+custom/total_distance(M?^m,       E	oBeA*
+
+custom/avg_center_dev>=Σ.       W	oBeA* 
+
+custom/routes_completed<L,       E	5oBeA*
+
+custom/total_distanceϙ@k9,       E	BeA*
+
+custom/avg_center_devs7߆)       7_ 	uBeA*
+
+custom/mean_reward   fՀ.       W	BeA* 
+
+custom/routes_completed:1Vhd,       E	BeA*
+
+custom/total_distanceg92_5*       	ôBeA*
+
+custom/total_reward  SQ,       E	CeA*
+
+custom/avg_center_dev=Hr.       W	`CeA* 
+
+custom/routes_completed_<
+R,       E	CeA*
+
+custom/total_distanceKALaM,       E	RCeA*
+
+custom/avg_center_dev>>z.       W	@SCeA* 
+
+custom/routes_completed^<U.,       E	`SCeA*
+
+custom/total_distance
+RAʳ8,       E	)cCeA*
+
+custom/avg_center_dev=㭔.       W	cCeA* 
+
+custom/routes_completed%I;j2^,       E	cCeA*
+
+custom/total_distance#?׸,       E	v2DeA*
+
+custom/avg_center_dev=b.       W	2DeA* 
+
+custom/routes_completed;'),       E	
+2DeA*
+
+custom/total_distance@h,       E	2yDeA*
+
+custom/avg_center_dev7T.       W	yDeA* 
+
+custom/routes_completed:&13,       E	ԦyDeA*
+
+custom/total_distancep:A*       	DeA*
+
+rollout/ep_len_meanIB*       	DeA*
+
+rollout/ep_rew_mean6^݂       QKD	DeA*
+
+time/fps  AɌ,       E	EeA*
+
+custom/avg_center_dev=n.       W	0EeA* 
+
+custom/routes_completed6<qY,       E	QEeA*
+
+custom/total_distance2c@ &       sO 	pEeA*
+
+train/approx_klfP;Q*       	EeA*
+
+train/clip_fraction  8=p'       F	EeA*
+
+train/clip_rangeL>*"0)       7_ 	EeA*
+
+train/entropy_lossT5~`/       m]P	EeA*!
+
+train/explained_variance&;N*       	EeA*
+
+train/learning_rateLJ8Cv!       {	EeA*
+
+
+train/loss>+1       	$EeA*#
+!
+train/policy_gradient_lossp绁        )P	EeA*
+
+	train/std?69`'       F	EeA*
+
+train/value_lossq5@
+
+,       E	CEeA*
+
+custom/avg_center_devx>vb.       W	EeA* 
+
+custom/routes_completed<6,       E	ٚEeA*
+
+custom/total_distanceA9,       E	qEeA	*
+
+custom/avg_center_dev=0e..       W	/rEeA	* 
+
+custom/routes_completed*<i,       E	NrEeA	*
+
+custom/total_distancen@<,       E	CIFeA	*
+
+custom/avg_center_devl=Q3.       W	ҊIFeA	* 
+
+custom/routes_completed=<,       E	IFeA	*
+
+custom/total_distancew1@1},       E	FeA
+*
+
+custom/avg_center_dev%M>t.       W	8FeA
+* 
+
+custom/routes_completed'x;09Ʈ,       E	YFeA
+*
+
+custom/total_distance{@y',       E	W.FeA
+*
+
+custom/avg_center_dev)8Y.I.       W	.FeA
+* 
+
+custom/routes_completed:D,       E	.FeA
+*
+
+custom/total_distancee:Ȁ,       E	OGeA
+*
+
+custom/avg_center_devy=%.       W	OGeA
+* 
+
+custom/routes_completed	<w).,       E	OGeA
+*
+
+custom/total_distanceBAg,       E	lGeA*
+
+custom/avg_center_devZ=Z .       W	GeA* 
+
+custom/routes_completedi<,       E	GeA*
+
+custom/total_distancep@,       E	 GeA*
+
+custom/avg_center_dev7hj.       W	GeA* 
+
+custom/routes_completed5a;[,       E	ɀGeA*
+
+custom/total_distance3:8\y,       E	>HeA*
+
+custom/avg_center_dev810=[
+q.       W	{>HeA* 
+
+custom/routes_completed;,       E	>HeA*
+
+custom/total_distanceE@|H,       E	vHeA*
+
+custom/avg_center_devE7;B#.       W	WwHeA* 
+
+custom/routes_completedqc:j,       E	wwHeA*
+
+custom/total_distancep:H*,       E	tHeA*
+
+custom/avg_center_devfi=.       W	HeA* 
+
+custom/routes_completed!
+;kڿ,       E	HeA*
+
+custom/total_distanceSY@0!;,       E	EIeA*
+
+custom/avg_center_dev=V.       W	*EIeA* 
+
+custom/routes_completedL@<tD,       E	JEIeA*
+
+custom/total_distanceu@؁N,       E	nIeA*
+
+custom/avg_center_devk=0.       W	IeA* 
+
+custom/routes_completed4<B8,       E	IeA*
+
+custom/total_distanceAײ^,       E	G[JeA
+*
+
+custom/avg_center_devx>#R.       W	G[JeA
+* 
+
+custom/routes_completedO-=o-
+,       E	H[JeA
+*
+
+custom/total_distance+AފsP,       E	JeA
+*
+
+custom/avg_center_dev 6ϋ)       7_ 	JeA
+*
+
+custom/mean_reward   ͧ.       W	JeA
+* 
+
+custom/routes_completed%I;Hp,       E	)JeA
+*
+
+custom/total_distanceG9}Y7*       	AJeA
+*
+
+custom/total_reward  ,       E	۬KeA*
+
+custom/avg_center_dev=)	2.       W	kKeA* 
+
+custom/routes_completed(<H,       E	KeA*
+
+custom/total_distanceqA{	,       E	KeA*
+
+custom/avg_center_devN=%.       W	KeA* 
+
+custom/routes_completedi =4Y>,       E	?KeA*
+
+custom/total_distance(;A8T,       E	KeA*
+
+custom/avg_center_devAR=$@.       W	YKeA* 
+
+custom/routes_completedZ<l,       E	wKeA*
+
+custom/total_distance@M,       E	$U?LeA*
+
+custom/avg_center_dev\60n.       W	U?LeA* 
+
+custom/routes_completedֹ:5yr,       E	U?LeA*
+
+custom/total_distance:Pɫ,       E	LeA*
+
+custom/avg_center_dev-O=8@.       W	5LeA* 
+
+custom/routes_completed<,       E	SLeA*
+
+custom/total_distanced@*       	kƭLeA*
+
+rollout/ep_len_mean$B*       	1ǭLeA*
+
+rollout/ep_rew_meanMu       QKD	uǭLeA*
+
+time/fps  AJ
+----
+utilities/__init__.py
+
+----
+utilities/utils.py
+import carla
+
+import numpy as np
+import weakref
+
+
+def get_actor_display_name(actor, truncate=250):
+    name = " ".join(actor.type_id.replace("_", ".").title().split(".")[1:])
+    return (name[:truncate - 1] + u"\u2026") if len(name) > truncate else name
+
+def smooth_action(old_value, new_value, smooth_factor):
+    return old_value * smooth_factor + new_value * (1.0 - smooth_factor)
+
+def build_projection_matrix(w, h, fov):
+    focal = w / (2.0 * np.tan(fov * np.pi / 360.0))
+    K = np.identity(3)
+    K[0, 0] = K[1, 1] = focal
+    K[0, 2] = w / 2.0
+    K[1, 2] = h / 2.0
+    return K
+
+def get_image_point(loc, K, w2c):
+    # Calculate 2D projection of 3D coordinate
+
+    # Format the input coordinate (loc is a carla.Position object)
+    point = np.array([loc.x, loc.y, loc.z, 1])
+    # transform to camera coordinates
+    point_camera = np.dot(w2c, point)
+
+    # New we must change from UE4's coordinate system to an "standard"
+    # (x, y ,z) -> (y, -z, x)
+    # and we remove the fourth componebonent also
+    point_camera = [point_camera[1], -point_camera[2], point_camera[0]]
+
+    # now project 3D->2D using the camera matrix
+    point_img = np.dot(K, point_camera)
+    # normalize
+    point_img[0] /= point_img[2]
+    point_img[1] /= point_img[2]
+
+    return point_img[0:2].astype(int)
+
+def distance_to_line(A, B, p):
+    p[2] = 0
+    num = np.linalg.norm(np.cross(B - A, A - p))
+    denom = np.linalg.norm(B - A)
+    if np.isclose(denom, 0):
+        return np.linalg.norm(p - A)
+    return num / denom
+
+
+def vector(v):
+    """ Turn carla Location/Vector3D/Rotation to np.array """
+    if isinstance(v, carla.Location) or isinstance(v, carla.Vector3D):
+        return np.array([v.x, v.y, v.z])
+    elif isinstance(v, carla.Rotation):
+        return np.array([v.pitch, v.yaw, v.roll])
+
+
+----
+utilities/graphics.py
+"""
+Welcome to CARLA manual control.
+
+Use ARROWS or WASD keys for control.
+
+    W            : throttle
+    S            : brake
+    AD           : steer
+    Q            : toggle reverse
+    Space        : hand-brake
+    M            : toggle manual transmission
+    ,/.          : gear up/down
+
+    TAB          : change sensor position
+    `            : next sensor
+    [1-9]        : change to sensor [1-9]
+    C            : change weather (Shift+C reverse)
+    Backspace    : change vehicle
+
+    R            : toggle recording images to disk
+
+    F1           : toggle HUD
+    H/?          : toggle help
+    ESC          : quit
+"""
+
+import pygame
+import math
+from utilities.utils import get_actor_display_name
+#===============================================================================
+# HUD
+#===============================================================================
+
+class HUD(object):
+    """
+        HUD class for displaying on-screen information
+    """
+
+    def __init__(self, width, height):
+        self.dim = (width, height)
+
+        # Select a monospace font for the info panel
+        fonts = [x for x in pygame.font.get_fonts() if "mono" in x]
+        default_font = "ubuntumono"
+        mono = default_font if default_font in fonts else fonts[0]
+        mono = pygame.font.match_font(mono)
+        self.font_mono = pygame.font.Font(mono, 14)
+
+        # Use default font for everything else
+        font = pygame.font.Font(pygame.font.get_default_font(), 20)
+        
+        self.notifications = FadingText(font, (width, 40), (0, height - 40))
+        self.help = HelpText(pygame.font.Font(mono, 24), width, height)
+        self.server_fps = 0
+        self.frame_number = 0
+        self.simulation_time = 0
+        self.show_info = True
+        self.info_text = []
+        self.server_clock = pygame.time.Clock()
+        self.vehicle = None
+
+    def set_vehicle(self, vehicle):
+        self.vehicle = vehicle
+
+    def tick(self, world, clock):
+        if self.show_info:
+            # Get all world vehicles
+            vehicles = world.get_actors().filter("vehicle.*")
+
+            # General simulation info
+            self.info_text = [
+                "Server:  % 16d FPS" % self.server_fps,
+                "Client:  % 16d FPS" % clock.get_fps(),
+                "",
+                "Map:     % 20s" % world.get_map().name,
+                #"Simulation time: % 12s" % datetime.timedelta(seconds=int(self.simulation_time)),
+                "Number of vehicles: % 8d" % len(vehicles)
+            ]
+
+            # Show info of attached vehicle
+            if self.vehicle is not None:
+                # Get transform, velocity and heading
+                t = self.vehicle.get_transform()
+                v = self.vehicle.get_velocity()
+                c = self.vehicle.get_control()
+                heading = "N" if abs(t.rotation.yaw) < 89.5 else ""
+                heading += "S" if abs(t.rotation.yaw) > 90.5 else ""
+                heading += "E" if 179.5 > t.rotation.yaw > 0.5 else ""
+                heading += "W" if -0.5 > t.rotation.yaw > -179.5 else ""
+                
+                self.info_text.extend([
+                    "Vehicle: % 20s" % get_actor_display_name(self.vehicle, truncate=20),
+                    "",
+                    "Speed:   % 15.0f km/h" % (3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2)),
+                    u"Heading:% 16.0f\N{DEGREE SIGN} % 2s" % (t.rotation.yaw, heading),
+                    "Location:% 20s" % ("(% 5.1f, % 5.1f)" % (t.location.x, t.location.y)),
+                    "Height:  % 18.0f m" % t.location.z,
+                    "",
+                    ("Throttle:", c.throttle, 0.0, 1.0),
+                    ("Steer:", c.steer, -1.0, 1.0),
+                    ("Brake:", c.brake, 0.0, 1.0)
+                ])
+            else:
+                self.info_text.append("Vehicle: % 20s" % "None")
+            
+        # Tick notifications
+        self.notifications.tick(world, clock)
+
+    def render(self, display, extra_info=[]):
+        if self.show_info:
+            info_surface = pygame.Surface((220, self.dim[1]))
+            info_surface.set_alpha(100)
+            display.blit(info_surface, (0, 0))
+            v_offset = 4
+            bar_h_offset = 100
+            bar_width = 106
+            self.info_text.append("")
+            self.info_text.extend(extra_info)
+            for item in self.info_text:
+                if v_offset + 18 > self.dim[1]:
+                    break
+                if isinstance(item, list):
+                    if len(item) > 1:
+                        points = [(x + 8, v_offset + 8 + (1.0 - y) * 30) for x, y in enumerate(item)]
+                        pygame.draw.lines(display, (255, 136, 0), False, points, 2)
+                    item = None
+                    v_offset += 18
+                elif isinstance(item, tuple):
+                    if isinstance(item[1], bool):
+                        rect = pygame.Rect((bar_h_offset, v_offset + 8), (6, 6))
+                        pygame.draw.rect(display, (255, 255, 255), rect, 0 if item[1] else 1)
+                    else:
+                        rect_border = pygame.Rect((bar_h_offset, v_offset + 8), (bar_width, 6))
+                        pygame.draw.rect(display, (255, 255, 255), rect_border, 1)
+                        f = (item[1] - item[2]) / (item[3] - item[2])
+                        if item[2] < 0.0:
+                            rect = pygame.Rect((bar_h_offset + f * (bar_width - 6), v_offset + 8), (6, 6))
+                        else:
+                            rect = pygame.Rect((bar_h_offset, v_offset + 8), (f * bar_width, 6))
+                        pygame.draw.rect(display, (255, 255, 255), rect)
+                    item = item[0]
+                if item: # At this point has to be a str.
+                    surface = self.font_mono.render(item, True, (255, 255, 255))
+                    display.blit(surface, (8, v_offset))
+                v_offset += 18
+        self.notifications.render(display)
+        self.help.render(display)
+
+    def on_world_tick(self, timestamp):
+        # Store info when server ticks
+        self.server_clock.tick()
+        self.server_fps = self.server_clock.get_fps()
+        self.frame_number = timestamp.frame_count
+        self.simulation_time = timestamp.elapsed_seconds
+
+    def toggle_info(self):
+        self.show_info = not self.show_info
+
+    def notification(self, text, seconds=2.0):
+        self.notifications.set_text(text, seconds=seconds)
+
+    def error(self, text):
+        self.notifications.set_text("Error: %s" % text, (255, 0, 0))
+
+
+#===============================================================================
+# FadingText
+#===============================================================================
+
+class FadingText(object):
+    def __init__(self, font, dim, pos):
+        self.font = font
+        self.dim = dim
+        self.pos = pos
+        self.seconds_left = 0
+        self.surface = pygame.Surface(self.dim)
+
+    def set_text(self, text, color=(255, 255, 255), seconds=2.0):
+        text_texture = self.font.render(text, True, color)
+        self.surface = pygame.Surface(self.dim)
+        self.seconds_left = seconds
+        self.surface.fill((0, 0, 0, 0))
+        self.surface.blit(text_texture, (10, 11))
+
+    def tick(self, _, clock):
+        delta_seconds = 1e-3 * clock.get_time()
+        self.seconds_left = max(0.0, self.seconds_left - delta_seconds)
+        self.surface.set_alpha(500.0 * self.seconds_left)
+
+    def render(self, display):
+        display.blit(self.surface, self.pos)
+
+
+#===============================================================================
+# HelpText
+#===============================================================================
+
+class HelpText(object):
+    def __init__(self, font, width, height):
+        lines = __doc__.split("\n")
+        self.font = font
+        self.dim = (680, len(lines) * 22 + 12)
+        self.pos = (0.5 * width - 0.5 * self.dim[0], 0.5 * height - 0.5 * self.dim[1])
+        self.seconds_left = 0
+        self.surface = pygame.Surface(self.dim)
+        self.surface.fill((0, 0, 0, 0))
+        for n, line in enumerate(lines):
+            text_texture = self.font.render(line, True, (255, 255, 255))
+            self.surface.blit(text_texture, (22, n * 22))
+            self._render = False
+        self.surface.set_alpha(220)
+
+    def toggle(self):
+        self._render = not self._render
+
+    def render(self, display):
+        if self._render:
+            display.blit(self.surface, self.pos)
+
+----
+utilities/planner.py
+import numpy as np
+
+# ==============================================================================
+# -- import route planning (copied and modified from CARLA 0.9.4's PythonAPI) --
+# ==============================================================================
+import carla
+from navigation.local_planner import RoadOption
+from navigation.global_route_planner import GlobalRoutePlanner
+from tools.misc import vector
+
+def compute_route_waypoints(world_map, start_waypoint, end_waypoint, resolution=1.0, plan=None):
+    """
+        Returns a list of (waypoint, RoadOption)-tuples that describes a route
+        starting at start_waypoint, ending at end_waypoint.
+
+        start_waypoint (carla.Waypoint):
+            Starting waypoint of the route
+        end_waypoint (carla.Waypoint):
+            Destination waypoint of the route
+        resolution (float):
+            Resolution, or lenght, of the steps between waypoints
+            (in meters)
+        plan (list(RoadOption) or None):
+            If plan is not None, generate a route that takes every option as provided
+            in the list for every intersections, in the given order.
+            (E.g. set plan=[RoadOption.STRAIGHT, RoadOption.LEFT, RoadOption.RIGHT]
+            to make the route go straight, then left, then right.)
+            If plan is None, we use the GlobalRoutePlanner to find a path between
+            start_waypoint and end_waypoint.
+    """
+
+    if plan is None:
+        # Setting up global router
+        grp = GlobalRoutePlanner(world_map, resolution)
+        
+        # Obtain route plan
+        route = grp.trace_route(
+            start_waypoint.transform.location,
+            end_waypoint.transform.location)
+    else:
+        # Compute route waypoints
+        route = []
+        current_waypoint = start_waypoint
+        for i, action in enumerate(plan):
+            # Generate waypoints to next junction
+            wp_choice = [current_waypoint]
+            while len(wp_choice) == 1:
+                current_waypoint = wp_choice[0]
+                route.append((current_waypoint, RoadOption.LANEFOLLOW))
+                wp_choice = current_waypoint.next(resolution)
+
+                # Stop at destination
+                if i > 0 and current_waypoint.transform.location.distance(end_waypoint.transform.location) < resolution:
+                    break
+
+            if action == RoadOption.VOID:
+                break
+
+            # Make sure that next intersection waypoints are far enough
+            # from each other so we choose the correct path
+            step = resolution
+            while len(wp_choice) > 1:
+                wp_choice = current_waypoint.next(step)
+                wp0, wp1 = wp_choice[:2]
+                if wp0.transform.location.distance(wp1.transform.location) < resolution:
+                    step += resolution
+                else:
+                    break
+
+            # Select appropriate path at the junction
+            if len(wp_choice) > 1:
+                # Current heading vector
+                current_transform = current_waypoint.transform
+                current_location = current_transform.location
+                projected_location = current_location + \
+                    carla.Location(
+                        x=np.cos(np.radians(current_transform.rotation.yaw)),
+                        y=np.sin(np.radians(current_transform.rotation.yaw)))
+                v_current = vector(current_location, projected_location)
+
+                direction = 0
+                if action == RoadOption.LEFT:
+                    direction = 1
+                elif action == RoadOption.RIGHT:
+                    direction = -1
+                elif action == RoadOption.STRAIGHT:
+                    direction = 0
+                select_criteria = float("inf")
+
+                # Choose correct path
+                for wp_select in wp_choice:
+                    v_select = vector(
+                        current_location, wp_select.transform.location)
+                    cross = float("inf")
+                    if direction == 0:
+                        cross = abs(np.cross(v_current, v_select)[-1])
+                    else:
+                        cross = direction * np.cross(v_current, v_select)[-1]
+                    if cross < select_criteria:
+                        select_criteria = cross
+                        current_waypoint = wp_select
+
+                # Generate all waypoints within the junction
+                # along selected path
+                route.append((current_waypoint, action))
+                current_waypoint = current_waypoint.next(resolution)[0]
+                while current_waypoint.is_intersection:
+                    route.append((current_waypoint, action))
+                    current_waypoint = current_waypoint.next(resolution)[0]
+        assert route
+
+    return route
+----
+carla_utils/__init__.py
+
+----
+carla_utils/graphics.py
+import glob
+import os
+import tempfile
+import carla
+import imageio
+import matplotlib.pyplot as plt
+import numpy as np
+import pygame
+import tqdm
+from absl import logging
+
+def setup(
+    width: int = 400,
+    height: int = 300,
+    render: bool = True,
+):
+    """Returns the `display`, `clock` and for a `PyGame` app.
+
+    Args:
+        width: The width (in pixels) of the app window.
+        height: The height (in pixels) of the app window.
+        render: If True it renders a window, it keeps the
+        frame buffer on the memory otherwise.
+
+    Returns:
+        display: The main app window or frame buffer object.
+        clock: The main app clock.
+        font: The font object used for generating text.
+    """
+    # PyGame setup.
+    pygame.init()  # pylint: disable=no-member
+    pygame.display.set_caption("OATomobile")
+    if render:
+        logging.debug("PyGame initializes a window display")
+        display = pygame.display.set_mode(  # pylint: disable=no-member
+            (width, height),
+            pygame.HWSURFACE | pygame.DOUBLEBUF,  # pylint: disable=no-member
+        )
+    else:
+        logging.debug("PyGame initializes a headless display")
+        display = pygame.Surface((width, height))  # pylint: disable=too-many-function-args
+    clock = pygame.time.Clock()
+    font = pygame.font.SysFont("dejavusansmono", 14)
+    return display, clock, font
+
+def make_dashboard(display, font, clock, observations) -> None:
+    """Generates the dashboard used for visualizing the agent.
+
+    Args:
+        display: The `PyGame` renderable surface.
+        observations: The aggregated observation object.
+        font: The font object used for generating text.
+        clock: The PyGame (client) clock.
+    """
+    # Clear dashboard.
+    display.fill(COLORS["BLACK"])
+
+    # Adaptive width.
+    ada_width = 0
+
+    if "preview_camera" in observations:
+        # Render front camera view.
+        ob_preview_camera_rgb = ndarray_to_pygame_surface(
+            array=observations.get("preview_camera"),
+            swapaxes=True,
+        )
+        display.blit(ob_preview_camera_rgb, (ada_width, 0))
+        ada_width = ada_width + ob_preview_camera_rgb.get_width()
+
+def ndarray_to_pygame_surface(array, swapaxes):
+
+    """Returns a `PyGame` surface from a `NumPy` array (image).
+
+    Args:
+        array: The `NumPy` representation of the image to be converted to `PyGame`.
+
+    Returns:
+        A `PyGame` surface.
+    """
+    # Make sure its in 0-255 range.
+    array = 255 * (array / array.max())
+    if swapaxes:
+        array = array.swapaxes(0, 1)
+    return pygame.surfarray.make_surface(array)
+
+
+# Color palette, the RGB values found at https://brandpalettes.com/.
+COLORS = {
+    # Default palette.
+    "WHITE": pygame.Color(255, 255, 255),
+    "BLACK": pygame.Color(0, 0, 0),
+    "RED": pygame.Color(255, 0, 0),
+    "GREEN": pygame.Color(0, 255, 0),
+    "BLUE": pygame.Color(0, 0, 255),
+    "SILVER": pygame.Color(195, 195, 195),
+    # Google palette.
+    "GOOGLE BLUE": pygame.Color(66, 133, 244),
+    "GOOGLE RED": pygame.Color(219, 68, 55),
+    "GOOGLE YELLOW": pygame.Color(244, 160, 0),
+    "GOOGLE GREEN": pygame.Color(15, 157, 88),
+    # Apple palettte.
+    "APPLE MIDNIGHT GREEN": pygame.Color(78, 88, 81),
+    "APPLE SPACE GREY": pygame.Color(83, 81, 80),
+    "APPLE ROSE GOLD": pygame.Color(250, 215, 189),
+    "APPLE LIGHT PURPLE": pygame.Color(209, 205, 218),
+    "APPLE LIGHT YELLOW": pygame.Color(255, 230, 129),
+    "APPLE LIGHT GREEN": pygame.Color(255, 230, 129),
+    "APPLE SILVER": pygame.Color(163, 170, 174),
+    "APPLE BLACK": pygame.Color(31, 32, 32),
+    "APPLE WHITE": pygame.Color(249, 246, 239),
+    "APPLE RED": pygame.Color(165, 40, 44),
+    "APPLE GOLD": pygame.Color(245, 221, 197),
+    # Slack palette.
+    "SLACK AUBERGINE": pygame.Color(74, 21, 75),
+    "SLACK BLUE": pygame.Color(54, 197, 240),
+    # Other palettes.
+    "AMAZON ORANGE": pygame.Color(255, 153, 0),
+    "FACEBOOK BLUE": pygame.Color(66, 103, 178),
+    "AIRBNB CORAL": pygame.Color(255, 88, 93),
+    "DR.PEPPER MAROON": pygame.Color(113, 31, 37),
+}
+--END--
