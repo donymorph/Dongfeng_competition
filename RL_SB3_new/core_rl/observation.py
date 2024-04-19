@@ -18,6 +18,7 @@ class CarlaObservations():
             "acceleration": Box(low=np.array([-np.inf]), high=np.array([np.inf]), shape=(1,), dtype=np.float32),
             "distance_to_center": Box(low=np.array([0]), high=np.array([np.inf]), shape=(1,), dtype=np.float32),
             "angle_difference": Box(low=np.array([-np.pi]), high=np.array([np.pi]), shape=(1,), dtype=np.float32),
+            "traffic_light_state": Discrete(4)  # 0: Red, 1: Yellow, 2: Green, 3: Off
             })
         return space
 # class EnhancedCarlaObservations(CarlaObservations):

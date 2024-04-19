@@ -60,7 +60,7 @@ def vector(v):
 
 
 # load routes from xml file 
-def load_route_from_xml(xml_file_path, route_id):
+def load_route_from_xmlold(xml_file_path, route_id):
     tree = ET.parse(xml_file_path)
     root = tree.getroot()
     
@@ -77,3 +77,31 @@ def load_route_from_xml(xml_file_path, route_id):
         waypoints.append(carla.Location(x=x, y=y, z=z))
     
     return waypoints
+
+
+def load_route_from_xmlnew(xml_file_path, route_id):
+    tree = ET.parse(xml_file_path)
+    root = tree.getroot()
+    
+    # Find the route with the specified id
+    route = root.find(f".//route[@id='{route_id}']")
+    if route is None:
+        raise ValueError(f"Route with id {route_id} not found")
+    
+    waypoints = []
+    for waypoint in route.findall('waypoint'):
+        x = float(waypoint.get('x'))
+        y = float(waypoint.get('y'))
+        z = float(waypoint.get('z'))
+       
+        # Create a Transform if you need orientation as well
+        transform = carla.Location(carla.Location(x=x, y=y, z=z))
+        waypoints.append(transform)
+    
+    return waypoints
+
+def get_all_route_ids(xml_file_path):
+    tree = ET.parse(xml_file_path)
+    root = tree.getroot()
+    route_ids = [route.get('id') for route in root.findall('.//route')]
+    return route_ids

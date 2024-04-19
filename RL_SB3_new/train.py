@@ -10,7 +10,7 @@ import time
 
 parser = argparse.ArgumentParser(description="PPO CARLA agent")
 parser.add_argument("--host", default="127.0.0.1", type=str, help="IP of the host server (default: 127.0.0.1)")
-parser.add_argument("--port", default=2004, type=int, help="TCP port to listen to (default: 2000)")
+parser.add_argument("--port", default=2000, type=int, help="TCP port to listen to (default: 2000)")
 parser.add_argument("--town", default="Town10HD_Opt", type=str, help="Name of the map in CARLA")
 parser.add_argument("--total_timesteps", type=int, default=1_000_000, help="Total timestep to train for")
 parser.add_argument("--reload_model", type=str, default="", help="Path to a model to reload")
@@ -47,9 +47,9 @@ AlgorithmRL = algorithm_dict[CONFIG["algorithm"]]
 
 # Setup environment
 env = CarlaEnv(host=args["host"], port=args["port"], town=args["town"],
-                fps=args["fps"], obs_sensor=CONFIG["obs_sensor"], obs_res=CONFIG["obs_res"], 
+                fps=args["fps"], obs_sensor_semantic=CONFIG["obs_sensor_semantic"], obs_sensor_rgb=CONFIG["obs_sensor_rgb"], obs_res=CONFIG["obs_res"], 
                     reward_fn=reward_functions[CONFIG["reward_fn"]],
-                    view_res=(1120, 560), action_smoothing=CONFIG["action_smoothing"],
+                    view_res=(1200, 600), action_smoothing=CONFIG["action_smoothing"],
                     allow_spectator=True, allow_render=args["no_render"]
                     )
 

@@ -16,13 +16,18 @@ from utilities.utils import get_actor_display_name, smooth_action, vector, dista
 from core_rl.actions import CarlaActions
 from core_rl.observation import CarlaObservations
 from utilities.planner import compute_route_waypoints
-from utilities.utils import load_route_from_xml
+from utilities.utils import load_route_from_xmlnew, get_all_route_ids
+from agent.rewards import combined_reward_function, reward_fn5, calculate_traffic_light_reward, reward_fn_waypoints
 # Carla environment
+RED = (255, 0, 0)
+YELLOW = (255, 255, 0)
+GREEN = (0, 255, 0)
+OFF_COLOR = (200, 200, 200)  # Light grey to indicate 'Off' or no traffic light
 class CarlaEnv(gym.Env):
 
     metadata = {'render.modes': ['human']}
 
-    def __init__(self, host, port, town, fps, obs_sensor, obs_res, view_res, reward_fn, action_smoothing, allow_render=True, allow_spectator=True, xml_file_path=None, route_id=None):
+    def __init__(self, host, port, town, fps, obs_sensor_semantic, obs_sensor_rgb, obs_res, view_res, reward_fn, action_smoothing, allow_render=True, allow_spectator=True, xml_file_path=None, route_id=None):
         
         self.obs_width, self.obs_height = obs_res
         self.spectator_width, self.spectator_height = view_res
@@ -34,7 +39,9 @@ class CarlaEnv(gym.Env):
         self.fps = fps
         self.actions = CarlaActions()
         self.observations = CarlaObservations(self.obs_height, self.obs_width)
-        self.obs_sensor = obs_sensor
+        #self.obs_sensor = obs_sensor
+        self.obs_sensor_semantic = obs_sensor_semantic
+        self.obs_sensor_rgb = obs_sensor_rgb
         self.control = carla.VehicleControl()
         self.action_space = self.actions.get_action_space()
         self.observation_space = self.observations.get_observation_space()
@@ -84,13 +91,11 @@ class CarlaEnv(gym.Env):
                 self.world.on_tick(self.hud.on_world_tick)
 
             # Set observation image
-            if 'rgb' in self.obs_sensor:
+            if 'rgb' in self.obs_sensor_rgb:
                 self.rgb_cam = self.world.get_blueprint_library().find('sensor.camera.rgb')
-            elif 'semantic' in self.obs_sensor:
-                self.rgb_cam = self.world.get_blueprint_library().find('sensor.camera.semantic_segmentation')
             else:
                 raise NotImplementedError('unknown sensor type')
-
+            
             self.rgb_cam.set_attribute('image_size_x', f'{self.obs_width}')
             self.rgb_cam.set_attribute('image_size_y', f'{self.obs_height}')
             self.rgb_cam.set_attribute('fov', '90')
@@ -98,7 +103,20 @@ class CarlaEnv(gym.Env):
             bound_x = self.vehicle.bounding_box.extent.x
             transform_front = carla.Transform(carla.Location(x=bound_x, z=1.0))
             self.sensor_front = self.world.spawn_actor(self.rgb_cam, transform_front, attach_to=self.vehicle)
-            self.sensor_front.listen(self._set_observation_image)          
+            self.sensor_front.listen(self._set_observation_rgb)
+
+            if 'semantic' in self.obs_sensor_semantic:
+                self.semantic_cam = self.world.get_blueprint_library().find('sensor.camera.semantic_segmentation')
+            else:
+                raise NotImplementedError('unknown sensor type')
+            self.semantic_cam.set_attribute('image_size_x', f'{self.obs_width}')
+            self.semantic_cam.set_attribute('image_size_y', f'{self.obs_height}')
+            self.semantic_cam.set_attribute('fov', '90')  
+
+            bound_x1 = self.vehicle.bounding_box.extent.x
+            transform_front = carla.Transform(carla.Location(x=bound_x1, z=1.0))
+            self.sensor_front1 = self.world.spawn_actor(self.semantic_cam, transform_front, attach_to=self.vehicle)
+            self.sensor_front1.listen(self._set_observation_semantic)        
  
             # Set spectator cam   
             if self.allow_spectator:
@@ -120,13 +138,14 @@ class CarlaEnv(gym.Env):
         self.num_routes_completed = -1
 
         # Generate a random route
-        self.generate_route(xml_file_path='routes/routes_town10all.xml', route_id='0')
+        self.generate_route(xml_file_path='RL_SB3_new/routes/routes_town10all.xml')
 
         self.closed = False
         self.terminate = False
         self.success_state = False
         self.extra_info = []  # List of extra info shown on the HUD
-        self.observation = self.observation_buffer = None  # Last received observation
+        self.observation = self.observation_buffer_rgb = None  # Last rgb received observation
+        self.observation1 = self.observation_buffer_semantic = None # Last semantic received observation
         self.viewer_image = self.viewer_image_buffer = None  # Last received image to show in the viewer
         self.step_count = 0
 
@@ -137,8 +156,23 @@ class CarlaEnv(gym.Env):
         self.center_lane_deviation = 0.0
         self.speed_accum = 0.0
         self.routes_completed = 0.0
+        self.base_driving_reward = 0
+        self.traffic_light_reward = 0
+        self.waypoint_navigation_reward = 0
         self.world.tick()
 
+        # Retrieve traffic light state and convert to human-readable format
+        self.base_driving_reward=0
+        self.traffic_light_reward=0
+        self.waypoint_navigation_reward=0
+        traffic_light_state_int = self._get_traffic_light_state()
+        traffic_light_states = {0: "Red", 1: "Yellow", 2: "Green", 3: "Off"}
+        self.traffic_light_state_str = traffic_light_states.get(traffic_light_state_int, "Unknown")
+        
+        # self.base_reward = reward_fn5(self)
+        # self.traffic_reward = calculate_traffic_light_reward(self)
+        # self.waypoint_reward = reward_fn_waypoints(self)
+        
         # Return initial observation
         time.sleep(0.2)
         obs = self.step(None)[0]
@@ -171,9 +205,15 @@ class CarlaEnv(gym.Env):
     #     self.vehicle.set_transform(self.start_wp.transform)
     #     time.sleep(0.2)
     #     self.vehicle.set_simulate_physics(True)  
-    def generate_route(self, xml_file_path, route_id='0'):
-        # Assuming load_route_from_xml returns a list of carla.Location objects
-        waypoints = load_route_from_xml(xml_file_path, route_id)
+    def generate_route(self, xml_file_path):
+        # Fetch all route IDs and select one randomly
+        route_ids = get_all_route_ids(xml_file_path)
+        if not route_ids:
+            raise ValueError("No routes found in the XML file.")
+        selected_route_id = random.choice(route_ids)
+        
+        # Load waypoints for the selected route
+        waypoints = load_route_from_xmlnew(xml_file_path, selected_route_id)
 
         # Convert carla.Location to carla.Waypoint
         start_location = waypoints[0]
@@ -181,7 +221,7 @@ class CarlaEnv(gym.Env):
         start_waypoint = self.map.get_waypoint(start_location)
         end_waypoint = self.map.get_waypoint(end_location)
 
-        # Use compute_route_waypoints to generate the detailed route
+        # Generate the detailed route
         self.route_waypoints = compute_route_waypoints(self.map, start_waypoint, end_waypoint, resolution=1.0)
 
         # Setup the vehicle at the starting point
@@ -211,7 +251,7 @@ class CarlaEnv(gym.Env):
         # Progress simulation by one step
         self.world.tick()
          # Gather observations
-        self.observation = self._get_observation()
+        self.observation = self.get_observation()
         if self.allow_spectator:
             self.viewer_image = self._get_viewer_image()
         # Update vehicle transform for new frame
@@ -261,7 +301,14 @@ class CarlaEnv(gym.Env):
 
         self.distance_from_center_history.append(self.distance_from_center)
         
+        
          # Update reward
+        self.base_driving_reward=reward_fn5(self)
+        self.traffic_light_reward=calculate_traffic_light_reward(self)
+        self.waypoint_navigation_reward=reward_fn_waypoints(self)
+        # print(f"reward_base {reward_fn5(self)}")
+        # print(f"reward_traffic {calculate_traffic_light_reward(self)}")
+        # print(f"reward_waypoint {reward_fn_waypoints(self)}")
         self.last_reward = self.reward_fn(self)
         self.total_reward += self.last_reward
         self.step_count += 1
@@ -298,34 +345,56 @@ class CarlaEnv(gym.Env):
 
         self.closed = True
     
+
     def render(self, mode="human"):
  
         # Tick render clock
         self.clock.tick()
         self.hud.tick(self.world, self.clock)
-  
         # Add metrics to HUD
         self.extra_info.extend([
             "Episode {}".format(self.episode_idx),
-            "Reward: % 19.2f" % self.last_reward,
+            "Driving Reward:      % 7.2f" % self.base_driving_reward,
+            "Traffic Light Reward:% 7.2f" % self.traffic_light_reward,
+            "Waypoint Reward:     % 7.2f" % self.waypoint_navigation_reward,
+            "Combined Reward:     % 7.2f" % self.last_reward,
+            "Total reward:        % 7.2f" % self.total_reward,
             "",
             "Routes completed:    % 7.2f" % self.routes_completed,
             "Distance traveled: % 7d m" % self.distance_traveled,
             "Center deviance:   % 7.2f m" % self.distance_from_center,
             "Avg center dev:    % 7.2f m" % (self.center_lane_deviation / self.step_count),
             "Avg speed:      % 7.2f km/h" % (self.speed_accum / self.step_count),
-            "Total reward:        % 7.2f" % self.total_reward,
+            "Traffic light state: {}".format(self.traffic_light_state_str)
         ])
         if self.allow_spectator:
             # Blit image from spectator camera
             self.viewer_image = self._draw_path(self.spectator_camera, self.viewer_image)
             self.display.blit(pygame.surfarray.make_surface(self.viewer_image.swapaxes(0, 1)), (0, 0))
-
+            traffic_light_state = self._get_traffic_light_state()
+            traffic_light_color = OFF_COLOR  # Default to 'Off' color
+        
+            if traffic_light_state == 0:  # Red
+                traffic_light_color = RED
+            elif traffic_light_state == 1:  # Yellow
+                traffic_light_color = YELLOW
+            elif traffic_light_state == 2:  # Green
+                traffic_light_color = GREEN
+         # Position for the traffic light indicator on the screen
+            traffic_light_position = (self.display.get_width() - 600, 20)
+            pygame.draw.circle(self.display, traffic_light_color, traffic_light_position, 20)
         # Superimpose current observation into top-right corner
         obs_h, obs_w = self.observation['camera'].shape[0], self.observation['camera'].shape[1]
-        pos_observation = (self.display.get_size()[0] - obs_w - 10, 10)
-        self.display.blit(pygame.surfarray.make_surface(self.get_semantic_image(self.observation['camera']).swapaxes(0, 1)), pos_observation)
+        semantic_position = (self.display.get_size()[0] - obs_w - 10, 10)
+        camera_position = (self.display.get_size()[0] - obs_w - 10, 100)
 
+        # Blit semantic camera image
+        semantic_image_surface = pygame.surfarray.make_surface((self.observation['semantic_camera']).swapaxes(0, 1))
+        self.display.blit(semantic_image_surface, semantic_position)
+
+        # Blit RGB camera image
+        camera_image_surface = pygame.surfarray.make_surface((self.observation['camera']).swapaxes(0, 1))
+        self.display.blit(camera_image_surface, camera_position)
         # Render HUD
         self.hud.render(self.display, extra_info=self.extra_info)
         self.extra_info = []  # Reset extra info list
@@ -354,8 +423,8 @@ class CarlaEnv(gym.Env):
 
     def get_semantic_image(self, input):
         
-        image = np.frombuffer(np.ascontiguousarray(input), dtype=np.uint8)
-        image = image.reshape((input.shape[0], input.shape[1], 3))
+        image = np.frombuffer(input.raw_data, dtype=np.uint8)
+        image = image.reshape((input.height, input.width, 4))
         image = image[:, :, 2]
         classes = {
             0: [0, 0, 0],         # None
@@ -410,41 +479,6 @@ class CarlaEnv(gym.Env):
         if self.allow_render:
             self.hud.notification("Crossed line %s" % " and ".join(text))
 
-    # def _get_observation(self):
-    #     while self.observation_buffer is None:
-    #         pass
-    #     obs = self.observation_buffer
-    #     self.observation_buffer = None
-    #     return obs
-
-    def _get_observation(self):
-        # Wait for the observation buffer to be filled
-        while self.observation_buffer is None:
-            time.sleep(0.01)  # Sleep to prevent CPU spinning, replace with a more appropriate waiting mechanism if possible
-
-        # Retrieve and reset the buffer
-        raw_image = self.observation_buffer
-        self.observation_buffer = None
-
-        # Convert raw image to a format suitable for the model (e.g., numpy array)
-        processed_image = self.process_image(raw_image)  # Implement this method based on your image processing needs
-
-        # Add additional sensor readings
-        additional_obs = self.get_observations()
-
-        # Combine image and additional sensor data into a single dictionary
-        observation = {
-            "camera": processed_image,  # Assuming process_image returns a numpy array or similar structure
-            'semantic_camera': self.get_semantic_image(self.process_image(raw_image)),
-            **additional_obs  # Merge additional observations into the main observation dictionary
-        }
-
-        return observation
-    def process_image(self, image):
-        # Example processing, adjust according to your needs
-        return np.array(image.raw_data).reshape((self.obs_height, self.obs_width, 4))[:, :, :3]  # Assuming BGRA to BGR conversion
-
-
     def _get_viewer_image(self):
         while self.viewer_image_buffer is None:
             pass
@@ -457,6 +491,11 @@ class CarlaEnv(gym.Env):
 
     def _set_observation_image(self, image):
         self.observation_buffer = image
+
+    def _set_observation_rgb(self, image):
+        self.observation_buffer_rgb = image
+    def _set_observation_semantic(self, image):
+        self.observation_buffer_semantic = image
 
     def _set_viewer_image(self, image):
         self.viewer_image_buffer = image
@@ -491,18 +530,18 @@ class CarlaEnv(gym.Env):
             image = cv2.circle(image, (x, y), radius=3, color=color, thickness=-1)
         return image    
 
-    def get_speed(self):
+    def _get_speed(self):
         # Assuming 'self.vehicle' is your carla.VehicleActor instance
         velocity = self.vehicle.get_velocity()
         speed_m_s = np.sqrt(velocity.x**2 + velocity.y**2 + velocity.z**2)  # Speed in m/s
         return speed_m_s * 3.6  # Convert m/s to km/h
 
-    def get_acceleration(self):
+    def _get_acceleration(self):
         # Retrieve acceleration from CARLA (if available) or calculate it
         acceleration = self.vehicle.get_acceleration()
         acceleration_magnitude = np.sqrt(acceleration.x**2 + acceleration.y**2 + acceleration.z**2)
         return acceleration_magnitude  # In m/s^2
-    def get_distance_to_center(self):
+    def _get_distance_to_center(self):
         # Get the vehicle's location
         location = self.vehicle.get_location()
         # Get the nearest waypoint in the center of the lane
@@ -511,7 +550,7 @@ class CarlaEnv(gym.Env):
         # This might require additional logic to ensure it's the lateral distance
         distance = location.distance(waypoint.transform.location)
         return distance
-    def get_angle_difference(self):
+    def _get_angle_difference(self):
         # Get vehicle's orientation
         vehicle_transform = self.vehicle.get_transform()
         vehicle_yaw = vehicle_transform.rotation.yaw
@@ -526,42 +565,110 @@ class CarlaEnv(gym.Env):
         angle_difference = np.arctan2(np.sin(angle_difference), np.cos(angle_difference))
         
         return angle_difference
-    def get_observations(self):
-        # Collect all relevant data for the observation space
-        
-        speed = self.get_speed()
-        acceleration = self.get_acceleration()
-        distance_to_center = self.get_distance_to_center()
-        angle_difference = self.get_angle_difference()
+    def process_image(self, image):
+        if not image.raw_data:
+            print("No image data received")
+            return np.zeros((self.obs_height, self.obs_width, 3), dtype=np.uint8)  # Return a black image
+        else:
+            image_data = np.frombuffer(image.raw_data, dtype=np.uint8)
+            if image_data.shape[0] != self.obs_height * self.obs_width * 4:
+                print(f"Unexpected image data size: {image_data.shape[0]}")
+                return np.zeros((self.obs_height, self.obs_width, 3), dtype=np.uint8)  # Return a black image
+            return image_data.reshape((self.obs_height, self.obs_width, 4))[:, :, :3]  # Assuming BGRA to BGR conversion
 
-        # Package into a dictionary exactly matching the defined observation_space
-        observations = {
+    def _get_traffic_light_state(self, threshold=10):
+        vehicle_location = self.vehicle.get_location()
+        lights = self.world.get_actors().filter('*traffic_light*')
+        closest_light = None
+        min_distance = float('inf')
+
+        for light in lights:
+            distance = vehicle_location.distance(light.get_location())
+            if distance < min_distance:
+                min_distance = distance
+                closest_light = light
+
+        if closest_light and min_distance <= threshold:
+            state = closest_light.get_state()
+            state_to_int = {
+                carla.TrafficLightState.Red: 0,
+                carla.TrafficLightState.Yellow: 1,
+                carla.TrafficLightState.Green: 2,
+                carla.TrafficLightState.Off: 3
+            }
+            return state_to_int.get(state, 3)
+        else:
+            return 3  # No relevant traffic light or too far
+    def list_all_traffic_lights(self):
+        # List all traffic lights to confirm they are loaded in the simulation
+        traffic_lights = self.world.get_actors().filter('*traffic_light*')
+        if not traffic_lights:
+            print("No traffic lights are present in the simulation.")
+        else:
+            for light in traffic_lights:
+                print(f"Traffic Light ID: {light.id}, Location: {light.get_location()}")
+                
+    def activate_traffic_lights(self):
+        # Ensure that traffic lights are not frozen and are in a normal operational state
+        traffic_lights = self.world.get_actors().filter('*traffic_light*')
+        for light in traffic_lights:
+            light.freeze(False)
+            print(f"Activated Traffic Light ID: {light.id}")
+    def find_nearest_traffic_light(self):
+        vehicle_location = self.vehicle.get_location()
+        traffic_lights = self.world.get_actors().filter('traffic_light')
+        closest_light = None
+        min_distance = float('inf')
+
+        for light in traffic_lights:
+            distance = vehicle_location.distance(light.get_location())
+            if distance < min_distance and distance < 1000:  # Example: 1000 meters as a maximum search radius
+                min_distance = distance
+                closest_light = light
+
+        if closest_light:
+            print(f"Closest Traffic Light ID: {closest_light.id} at distance {min_distance}")
+        else:
+            print("No nearby traffic lights found within the search radius.")
+    def get_observation(self):
+        # Wait for the observation buffer to be filled
+        while self.observation_buffer_rgb is None:
+            time.sleep(0.01)  # Sleep to prevent CPU spinning, replace with more appropriate waiting mechanism if available
+        while self.observation_buffer_semantic is None:
+            time.sleep(0.01) 
+        # Retrieve and reset the buffer
+        raw_image = self.observation_buffer_rgb
+        self.observation_buffer_rgb = None
+
+        raw_semantic =self.observation_buffer_semantic
+        self.observation_buffer_semantic = None
+
+
+
+        # Process the raw image to a format suitable for the model (e.g., numpy array)
+        processed_image = self.process_image(raw_image)  # Adjust this method to fit your image processing needs
+        semantic_image = self.get_semantic_image(raw_semantic)  # Get semantic image from processed image
+
+        # Collect all additional sensor data
+        speed = self._get_speed()
+        acceleration = self._get_acceleration()
+        distance_to_center = self._get_distance_to_center()
+        angle_difference = self._get_angle_difference()
+        traffic_light_state = self._get_traffic_light_state()
+
+        # Package into a dictionary matching the defined observation_space
+        observation = {
+            'camera': processed_image,
+            'semantic_camera': semantic_image,
             'speed': np.array([speed], dtype=np.float32),
             'acceleration': np.array([acceleration], dtype=np.float32),
             'distance_to_center': np.array([distance_to_center], dtype=np.float32),
-            'angle_difference': np.array([angle_difference], dtype=np.float32)
+            'angle_difference': np.array([angle_difference], dtype=np.float32),
+            "traffic_light_state": traffic_light_state
         }
-        return observations
 
-
-    def generate_dense_route(self, sparse_waypoints):
-        dense_route = []
-        for i in range(len(sparse_waypoints) - 1):
-            # Get the starting waypoint from the map
-            start_wp = self.map.get_waypoint(sparse_waypoints[i])
-            end_wp = self.map.get_waypoint(sparse_waypoints[i + 1])
-            
-            # This is a simplified approach to add waypoints. You might need to adjust based on your map and CARLA version.
-            # For a more sophisticated approach, consider using CARLA's routing functionalities or a custom pathfinding algorithm.
-            dense_route.append(start_wp)
-            next_wps = start_wp.next_until_lane_end(2.0)  # Generate waypoints every 2 meters until the lane end
-            dense_route.extend(next_wps)
-            
-            # Ensure the last waypoint is added to the route
-            if end_wp not in dense_route:
-                dense_route.append(end_wp)
-        
-        return dense_route 
-    print("finished")        
+        return observation
+    
+    print("finished")      
     
         

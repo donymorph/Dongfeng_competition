@@ -38,7 +38,7 @@ algorithm_params = {
         policy_kwargs=dict(net_arch=[400, 300]),
     ),
     "SAC_BEST": dict(
-        learning_rate=lr_schedule(1e-4, 5e-7, 5e-7),
+        learning_rate=lr_schedule(1e-4, 5e-7, 2),
         buffer_size=300000,
         batch_size=256,
         ent_coef='auto',
@@ -48,7 +48,7 @@ algorithm_params = {
         gradient_steps=64,
         learning_starts=10000,
         use_sde=True,
-        policy_kwargs=dict(log_std_init=-3, net_arch=[500, 300]),
+        policy_kwargs=dict(log_std_init=-3, net_arch=[500, 300], use_sde =True),
     ),
 }
 
@@ -74,9 +74,19 @@ reward_params = {
          penalty_reward=-10,
      ),
     "reward_fn_5_best": dict(
-        early_stop=False,
-        min_speed=5.0,  # km/h
+        early_stop=True,
+        min_speed=10.0,  # km/h
         max_speed=20.0,  # km/h 
+        target_speed=15.0,  # kmh
+        max_distance=2.0,  # Max distance from center before terminating
+        max_std_center_lane=0.35,
+        max_angle_center_lane=90,
+        penalty_reward=-10,
+    ),
+    "combined_reward": dict(
+        early_stop=True,
+        min_speed=5.0,  # km/h
+        max_speed=15.0,  # km/h 
         target_speed=10.0,  # kmh
         max_distance=2.0,  # Max distance from center before terminating
         max_std_center_lane=0.35,
@@ -89,9 +99,10 @@ _CONFIG_1 = {
     "algorithm": "SAC",
     "algorithm_params": algorithm_params["SAC_BEST"],
     "action_smoothing": 0.75,
-    "reward_fn": "reward_fn5",
-    "reward_params": reward_params["reward_fn_5_best"],
-    "obs_sensor": "semantic",
+    "reward_fn": "combined_reward",
+    "reward_params": reward_params["combined_reward"],
+    "obs_sensor_rgb": "rgb",
+    "obs_sensor_semantic": "semantic",
     "obs_res": (160, 80),
 }
 CONFIGS = {
