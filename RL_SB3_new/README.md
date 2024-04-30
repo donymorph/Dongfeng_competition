@@ -29,17 +29,15 @@ The configuration is located in `config.py`. It contains the following parameter
 
 ## Usage ##
 ```bash
-# Clone the repo
-git clone https://github.com/rohanNkhaire/RL_SB3_carla.git
-
 # Go inside the repo
-cd RL_SB3_carla
+cd RL_SB3_new
 
 # Run the training script
 # The default --host arg is IP of a different Host
 python3 train.py
+# evalute the trained models
+python3 evaluate.py
 ```
-
 ## Run an experiment ##
 ```bash
 # Run Carla on your system

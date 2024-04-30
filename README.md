@@ -46,7 +46,14 @@
     <a href="https://github.com/donymorph/Dongfeng_competition/issues">Request Feature</a>
   </p>
 </div>
+<br />
 
+<div align="center">
+<a href="https://github.com/donymorph/Dongfeng_competition/RL_SB3"><strong>RL SB3 user interface</strong></a>
+  <a href="https://github.com/donymorph/Dongfeng_competition">
+    <img src="assets/RL_SB3_UI.png" >
+  </a>
+</div>
 
 
 <!-- TABLE OF CONTENTS -->
@@ -122,9 +129,10 @@ Clone the repo, setup CARLA 0.9.14 or 0.9.15, and build the conda environment:
     ```
     python agents/examples/manual_control.py
     ```
-3. Test RL in the [RL+SB3](https://github.com/donymorph/Dongfeng_competition/tree/main/RL%2BSB3) folder and evaluate the trained [models](https://github.com/donymorph/Dongfeng_competition/tree/main/RL%2BSB3/tensorboard). It used [Stable Baseline3](https://stable-baselines3.readthedocs.io/en/master/) to train RL models
+3. Test RL in the [RL+SB3_new](https://github.com/donymorph/Dongfeng_competition/tree/main/RL%2BSB3) folder and evaluate the trained [models](https://github.com/donymorph/Dongfeng_competition/tree/main/RL%2BSB3/tensorboard). It used [Stable Baseline3](https://stable-baselines3.readthedocs.io/en/master/) to train RL models
     ```
-    python RL+SB3/eval.py --model RL+SB3/tensorboard/PPO_1682250345_id1/model_300000_steps.zip 
+    python RL_SB3_new/train.py ## for training
+    python RL_SB3_new/evaluate.py ## for evaluation 
     ```
     it takes following arguments 
     ```

@@ -10,13 +10,14 @@ import pygame
 import cv2
 import xml.etree.ElementTree as ET
 
-
+from navigation.basic_agent import BasicAgent
 from utilities.graphics import HUD
 from utilities.utils import get_actor_display_name, smooth_action, vector, distance_to_line, build_projection_matrix, get_image_point
 from core_rl.actions import CarlaActions
 from core_rl.observation import CarlaObservations
-from utilities.planner import compute_route_waypoints
-from utilities.utils import load_route_from_xmlnew, get_all_route_ids
+from utilities.planner import compute_route_waypoints, generate_route
+from utilities.utils import load_route_from_xmlnew, get_all_route_ids, load_route_from_xmlold, draw_route
+from utilities.visualize_multiple_sensors import SensorManager, DisplayManager
 from agent.rewards import combined_reward_function, reward_fn5, calculate_traffic_light_reward, reward_fn_waypoints
 # Carla environment
 RED = (255, 0, 0)
@@ -27,7 +28,7 @@ class CarlaEnv(gym.Env):
 
     metadata = {'render.modes': ['human']}
 
-    def __init__(self, host, port, town, fps, obs_sensor_semantic, obs_sensor_rgb, obs_res, view_res, reward_fn, action_smoothing, allow_render=True, allow_spectator=True, xml_file_path=None, route_id=None):
+    def __init__(self, host, port, town, fps, obs_sensor_semantic, obs_sensor_rgb, obs_res, view_res, compute_reward, action_smoothing, allow_render=True, allow_spectator=True, xml_file_path=None, route_id=None):
         
         self.obs_width, self.obs_height = obs_res
         self.spectator_width, self.spectator_height = view_res
@@ -47,9 +48,12 @@ class CarlaEnv(gym.Env):
         self.observation_space = self.observations.get_observation_space()
         self.max_distance = 3000
         self.action_smoothing = action_smoothing
-        self.reward_fn = (lambda x: 0) if not callable(reward_fn) else reward_fn
+        #self.reward_fn = (lambda x: 0) if not callable(reward_fn) else reward_fn
+        self.compute_reward = (lambda x: 0) if not callable(compute_reward) else compute_reward
         self.xml_file_path = xml_file_path
         self.route_id = route_id
+        self.spawned_vehicles = []
+        
         
         try:
             self.client = carla.Client(host, port)  
@@ -66,12 +70,16 @@ class CarlaEnv(gym.Env):
             self.client.reload_world(False)  # reload map keeping the world settings
             self.map = self.world.get_map()
             
+            
             # Spawn Vehicle
             self.tesla = self.world.get_blueprint_library().filter('model3')[0]
             self.start_transform = self._get_start_transform()
             self.curr_loc = self.start_transform.location
-            self.vehicle = self.world.spawn_actor(self.tesla, self.start_transform)
-
+            #self.vehicle = self.world.spawn_actor(self.tesla, self.start_transform)
+            self.vehicle = self.world.try_spawn_actor(self.tesla, self.start_transform)
+            if not self.vehicle:
+                raise Exception("Failed to spawn ego vehicle.")
+            self.initialize_traffic_manager()
            # Spawn collision and Lane invasion sensors
             colsensor = self.world.get_blueprint_library().find('sensor.other.collision')
             lanesensor = self.world.get_blueprint_library().find('sensor.other.lane_invasion')
@@ -84,68 +92,184 @@ class CarlaEnv(gym.Env):
             if self.allow_render:
                 pygame.init()
                 pygame.font.init()
-                self.display = pygame.display.set_mode((self.spectator_width, self.spectator_height), pygame.HWSURFACE | pygame.DOUBLEBUF)
+                #self.display = pygame.display.set_mode((self.spectator_width, self.spectator_height), pygame.HWSURFACE | pygame.DOUBLEBUF)
+                self.display_manager = DisplayManager(grid_size=[2.4, 3.6], window_size=[self.spectator_width, self.spectator_height])
                 self.clock = pygame.time.Clock()
-                self.hud = HUD(self.spectator_width, self.spectator_height)
+                self.hud = HUD(self.spectator_width*0.6, self.spectator_height)
                 self.hud.set_vehicle(self.vehicle)
                 self.world.on_tick(self.hud.on_world_tick)
-
-            # Set observation image
-            if 'rgb' in self.obs_sensor_rgb:
-                self.rgb_cam = self.world.get_blueprint_library().find('sensor.camera.rgb')
-            else:
-                raise NotImplementedError('unknown sensor type')
+                self.setup_sensors()
             
-            self.rgb_cam.set_attribute('image_size_x', f'{self.obs_width}')
-            self.rgb_cam.set_attribute('image_size_y', f'{self.obs_height}')
-            self.rgb_cam.set_attribute('fov', '90')
+                # Set observation image
+                # if 'rgb' in self.obs_sensor_rgb:
+                #     self.rgb_cam = self.world.get_blueprint_library().find('sensor.camera.rgb')
+                # else:
+                #     raise NotImplementedError('unknown sensor type')
+                
+                # self.rgb_cam.set_attribute('image_size_x', f'{self.obs_width}')
+                # self.rgb_cam.set_attribute('image_size_y', f'{self.obs_height}')
+                # self.rgb_cam.set_attribute('fov', '90')
 
-            bound_x = self.vehicle.bounding_box.extent.x
-            transform_front = carla.Transform(carla.Location(x=bound_x, z=1.0))
-            self.sensor_front = self.world.spawn_actor(self.rgb_cam, transform_front, attach_to=self.vehicle)
-            self.sensor_front.listen(self._set_observation_rgb)
+                # bound_x = self.vehicle.bounding_box.extent.x
+                # transform_front = carla.Transform(carla.Location(x=bound_x, z=2.4), carla.Rotation(yaw=0))
+                # self.sensor_front = self.world.spawn_actor(self.rgb_cam, transform_front, attach_to=self.vehicle)
+                # self.sensor_front.listen(self._set_observation_rgb)
 
-            if 'semantic' in self.obs_sensor_semantic:
-                self.semantic_cam = self.world.get_blueprint_library().find('sensor.camera.semantic_segmentation')
-            else:
-                raise NotImplementedError('unknown sensor type')
-            self.semantic_cam.set_attribute('image_size_x', f'{self.obs_width}')
-            self.semantic_cam.set_attribute('image_size_y', f'{self.obs_height}')
-            self.semantic_cam.set_attribute('fov', '90')  
+                # if 'rgb' in self.obs_sensor_rgb:
+                #     self.rgb_cam_left = self.world.get_blueprint_library().find('sensor.camera.rgb')
+                # else:
+                #     raise NotImplementedError('unknown sensor type')
+                
+                # self.rgb_cam_left.set_attribute('image_size_x', f'{self.obs_width}')
+                # self.rgb_cam_left.set_attribute('image_size_y', f'{self.obs_height}')
+                # self.rgb_cam_left.set_attribute('fov', '90')
 
-            bound_x1 = self.vehicle.bounding_box.extent.x
-            transform_front = carla.Transform(carla.Location(x=bound_x1, z=1.0))
-            self.sensor_front1 = self.world.spawn_actor(self.semantic_cam, transform_front, attach_to=self.vehicle)
-            self.sensor_front1.listen(self._set_observation_semantic)        
- 
+                # bound_x = self.vehicle.bounding_box.extent.x
+                # transform_front = carla.Transform(carla.Location(x=bound_x, z=2.4), carla.Rotation(yaw=-90))
+                # self.sensor_left = self.world.spawn_actor(self.rgb_cam_left, transform_front, attach_to=self.vehicle)
+                # self.sensor_left.listen(self._set_observation_rgb_left)
+
+                # if 'rgb' in self.obs_sensor_rgb:
+                #     self.rgb_cam_right = self.world.get_blueprint_library().find('sensor.camera.rgb')
+                # else:
+                #     raise NotImplementedError('unknown sensor type')
+                
+                # self.rgb_cam_right.set_attribute('image_size_x', f'{self.obs_width}')
+                # self.rgb_cam_right.set_attribute('image_size_y', f'{self.obs_height}')
+                # self.rgb_cam_right.set_attribute('fov', '90')
+
+                # bound_x = self.vehicle.bounding_box.extent.x
+                # transform_front = carla.Transform(carla.Location(x=bound_x, z=2.4), carla.Rotation(yaw=90))
+                # self.sensor_right = self.world.spawn_actor(self.rgb_cam_right, transform_front, attach_to=self.vehicle)
+                # self.sensor_right.listen(self._set_observation_rgb_right)
+
+                if 'semantic' in self.obs_sensor_semantic:
+                    self.semantic_cam = self.world.get_blueprint_library().find('sensor.camera.semantic_segmentation')
+                else:
+                    raise NotImplementedError('unknown sensor type')
+                self.semantic_cam.set_attribute('image_size_x', f'{self.obs_width}')
+                self.semantic_cam.set_attribute('image_size_y', f'{self.obs_height}')
+                self.semantic_cam.set_attribute('fov', '90')  
+
+                bound_x = self.vehicle.bounding_box.extent.x
+                transform_front = carla.Transform(carla.Location(x=bound_x, z=2.4))
+                self.sensor_front1 = self.world.spawn_actor(self.semantic_cam, transform_front, attach_to=self.vehicle)
+                self.sensor_front1.listen(self._set_observation_semantic)  
+
+                if 'semantic' in self.obs_sensor_semantic:
+                    self.semantic_cam_left = self.world.get_blueprint_library().find('sensor.camera.semantic_segmentation')
+                else:
+                    raise NotImplementedError('unknown sensor type')
+                self.semantic_cam_left.set_attribute('image_size_x', f'{self.obs_width}')
+                self.semantic_cam_left.set_attribute('image_size_y', f'{self.obs_height}')
+                self.semantic_cam_left.set_attribute('fov', '90')  
+
+               
+                transform_front = carla.Transform(carla.Location(x=bound_x, z=2.4), carla.Rotation(yaw=-90))
+                self.sensor_left = self.world.spawn_actor(self.semantic_cam_left, transform_front, attach_to=self.vehicle)
+                self.sensor_left.listen(self._set_observation_semantic_left)  
+
+                if 'semantic' in self.obs_sensor_semantic:
+                    self.semantic_cam_right = self.world.get_blueprint_library().find('sensor.camera.semantic_segmentation')
+                else:
+                    raise NotImplementedError('unknown sensor type')
+                self.semantic_cam_right.set_attribute('image_size_x', f'{self.obs_width}')
+                self.semantic_cam_right.set_attribute('image_size_y', f'{self.obs_height}')
+                self.semantic_cam_right.set_attribute('fov', '90')  
+
+               
+                transform_front = carla.Transform(carla.Location(x=bound_x, z=2.4), carla.Rotation(yaw=90))
+                self.sensor_right = self.world.spawn_actor(self.semantic_cam_right, transform_front, attach_to=self.vehicle)
+                self.sensor_right.listen(self._set_observation_semantic_right)  
+
+                if 'semantic' in self.obs_sensor_semantic:
+                    self.semantic_cam_back = self.world.get_blueprint_library().find('sensor.camera.semantic_segmentation')
+                else:
+                    raise NotImplementedError('unknown sensor type')
+                self.semantic_cam_back.set_attribute('image_size_x', f'{self.obs_width*2}')
+                self.semantic_cam_back.set_attribute('image_size_y', f'{self.obs_height}')
+                self.semantic_cam_back.set_attribute('fov', '90')  
+
+               
+                transform_front = carla.Transform(carla.Location(x=-1, z=2.4), carla.Rotation(yaw=180))
+                self.sensor_back = self.world.spawn_actor(self.semantic_cam_right, transform_front, attach_to=self.vehicle)
+                self.sensor_back.listen(self._set_observation_semantic_back)  
+
             # Set spectator cam   
             if self.allow_spectator:
                 self.spectator_camera = self.world.get_blueprint_library().find('sensor.camera.rgb')
                 self.spectator_camera.set_attribute('image_size_x', f'{self.spectator_width}')
                 self.spectator_camera.set_attribute('image_size_y', f'{self.spectator_height}')
-                self.spectator_camera.set_attribute('fov', '100')
-                transform = carla.Transform(carla.Location(x=-5.5, z=2.5), carla.Rotation(pitch=-10.0))
+                self.spectator_camera.set_attribute('fov', '90')
+                transform = carla.Transform(carla.Location(x=-10, z=10), carla.Rotation(pitch=-45))
                 self.spectator_sensor = self.world.spawn_actor(self.spectator_camera, transform, attach_to=self.vehicle)
                 self.spectator_sensor.listen(self._set_viewer_image)
-                    
+                        # Example setup for a single RGB camera sensor
+            if self.allow_spectator:
+                
+
+                # LIDAR
+                lidar_bp = self.world.get_blueprint_library().find('sensor.lidar.ray_cast')
+                lidar_bp.set_attribute('range', '100')
+                lidar_bp.set_attribute('dropoff_general_rate', lidar_bp.get_attribute('dropoff_general_rate').recommended_values[0])
+                lidar_bp.set_attribute('dropoff_intensity_limit', lidar_bp.get_attribute('dropoff_intensity_limit').recommended_values[0])
+                lidar_bp.set_attribute('dropoff_zero_intensity', lidar_bp.get_attribute('dropoff_zero_intensity').recommended_values[0])
+
+
+                # Adjust the sensor location and rotation as needed
+                lidar_transform = carla.Transform(carla.Location(x=0, z=2.5))
+                self.lidar_sensor = self.world.spawn_actor(lidar_bp, lidar_transform, attach_to=self.vehicle)
+                self.lidar_sensor.listen(self.handle_lidar_data)
+
             self.reset()
         except RuntimeError as msg:
             pass
+
+    def setup_sensors(self):
+                camera_options = {'fov': '90'}
+                camera_transform_left = carla.Transform(carla.Location(x=0, z=2.4), carla.Rotation(yaw=-90))
+                self.rgb_camera_left = SensorManager(self.world, self.display_manager, 'RGBCamera', camera_transform_left, self.vehicle, {}, display_pos=[0, 0.66])
+                camera_transform_center = carla.Transform(carla.Location(x=0, z=2.4), carla.Rotation(yaw=+00))
+                self.rgb_camera_center = SensorManager(self.world, self.display_manager, 'RGBCamera', camera_transform_center, self.vehicle, {}, display_pos=[0, 1.66])
+                camera_transform_right = carla.Transform(carla.Location(x=0, z=2.4), carla.Rotation(yaw=+90))
+                self.rgb_camera_right = SensorManager(self.world, self.display_manager, 'RGBCamera', camera_transform_right, self.vehicle, {}, display_pos=[0, 2.66])
+                camera_transform_back = carla.Transform(carla.Location(x=0, z=2.4), carla.Rotation(yaw=+180))
+                self.rgb_camera_back = SensorManager(self.world, self.display_manager, 'RGBCamera', camera_transform_back, self.vehicle, {}, display_pos=[1, 1.66])
+                lidar_position = carla.Transform(carla.Location(x=0, z=2.4))
+                self.Lidar = SensorManager(self.world, self.display_manager, 'LiDAR', lidar_position, self.vehicle, {'channels' : '64', 'range' : '100',  'points_per_second': '250000', 'rotation_frequency': '20'}, display_pos=[1, 2.66])
+                #self.Lidar = SensorManager(self.world, self.display_manager, 'SemanticLiDAR', lidar_position, self.vehicle, {'channels' : '64', 'range' : '100',  'points_per_second': '250000', 'rotation_frequency': '20'}, display_pos=[1, 2])
+                # camera_transform_top = carla.Transform(carla.Location(x=0, z=20), carla.Rotation(pitch=-90))
+                # self.topdown_camera = SensorManager(self.world, self.display_manager, 'RGBCamera', camera_transform_top, self.vehicle, {}, display_pos=[1, 0.9])
+                #self.topdown_camera.sensor.listen(self._set_observation_semantic)  
     # Resets environment for new episode
     def reset(self):
 
         self.episode_idx += 1
         self.num_routes_completed = -1
+        
 
         # Generate a random route
-        self.generate_route(xml_file_path='RL_SB3_new/routes/routes_town10all.xml')
-
+        generate_route(self, xml_file_path='RL_SB3_new/routes/dongfeng.xml')
+        self.cleanup()
+        
+        # ego_vehicle_spawn_index = 28
+        ego_vehicle_route_indices = [28, 124, 30, 31, 33, 97, 107, 58, 131, 65, 63, 152, 148, 74, 153, 145, 135, 139, 110, 102, 116, 27, 122, 25, 78, 80, 91, 0, 103, 111, 95, 141, 109, 14, 12, 125, 7, 9]
+        # self.vehicle = self.spawn_and_assign_routes([ego_vehicle_spawn_index], ego_vehicle_route_indices)[0]
+        other_vehicle_spawn_indices = [28, 130, 29, 70, 73] # 17, 18, 97, 107, 64, 128, 79, 137, 131
+        self.spawned_vehicles = self.spawn_and_assign_routes(other_vehicle_spawn_indices, ego_vehicle_route_indices)
+        
         self.closed = False
         self.terminate = False
         self.success_state = False
         self.extra_info = []  # List of extra info shown on the HUD
-        self.observation = self.observation_buffer_rgb = None  # Last rgb received observation
-        self.observation1 = self.observation_buffer_semantic = None # Last semantic received observation
+        self.observation = []
+        # self.observation_rgb = self.observation_buffer_rgb = None  # Last rgb received observation
+        # self.observation_rgb_left = self.observation_buffer_rgb_left = None
+        # self.observation_rgb_right = self.observation_buffer_rgb_right = None
+        self.observation_semantic = self.observation_buffer_semantic = None # Last semantic received observation
+        self.observation_semantic_left = self.observation_buffer_semantic_left = None
+        self.observation_semantic_right = self.observation_buffer_semantic_right = None
+        self.observation_semantic_right = self.observation_buffer_semantic_back = None
         self.viewer_image = self.viewer_image_buffer = None  # Last received image to show in the viewer
         self.step_count = 0
 
@@ -169,6 +293,7 @@ class CarlaEnv(gym.Env):
         traffic_light_states = {0: "Red", 1: "Yellow", 2: "Green", 3: "Off"}
         self.traffic_light_state_str = traffic_light_states.get(traffic_light_state_int, "Unknown")
         
+        
         # self.base_reward = reward_fn5(self)
         # self.traffic_reward = calculate_traffic_light_reward(self)
         # self.waypoint_reward = reward_fn_waypoints(self)
@@ -177,63 +302,10 @@ class CarlaEnv(gym.Env):
         time.sleep(0.2)
         obs = self.step(None)[0]
         time.sleep(0.2)
-
+      
         return obs
+     
     
-    # def generate_route(self):
-    #     # Do a soft reset (teleport vehicle)
-    #     self.control.steer = float(0.0)
-    #     self.control.throttle = float(0.0)
-    #     self.vehicle.set_simulate_physics(False)  # Reset the car's physics
-
-    #     # Generate waypoints along the lap
-
-    #     spawn_points_list = np.random.choice(self.map.get_spawn_points(), 2, replace=False)
-    #     route_length = 1
-    #     while route_length <= 1:
-    #         self.start_wp, self.end_wp = [self.map.get_waypoint(spawn.location) for spawn in
-    #                                       spawn_points_list]
-    #         self.route_waypoints = compute_route_waypoints(self.map, self.start_wp, self.end_wp, resolution=1.0)
-    #         route_length = len(self.route_waypoints)
-    #         if route_length <= 1:
-    #             spawn_points_list = np.random.choice(self.map.get_spawn_points(), 2, replace=False)
-
-    #     self.distance_from_center_history = deque(maxlen=30)
-
-    #     self.current_waypoint_index = 0
-    #     self.num_routes_completed += 1
-    #     self.vehicle.set_transform(self.start_wp.transform)
-    #     time.sleep(0.2)
-    #     self.vehicle.set_simulate_physics(True)  
-    def generate_route(self, xml_file_path):
-        # Fetch all route IDs and select one randomly
-        route_ids = get_all_route_ids(xml_file_path)
-        if not route_ids:
-            raise ValueError("No routes found in the XML file.")
-        selected_route_id = random.choice(route_ids)
-        
-        # Load waypoints for the selected route
-        waypoints = load_route_from_xmlnew(xml_file_path, selected_route_id)
-
-        # Convert carla.Location to carla.Waypoint
-        start_location = waypoints[0]
-        end_location = waypoints[-1]
-        start_waypoint = self.map.get_waypoint(start_location)
-        end_waypoint = self.map.get_waypoint(end_location)
-
-        # Generate the detailed route
-        self.route_waypoints = compute_route_waypoints(self.map, start_waypoint, end_waypoint, resolution=1.0)
-
-        # Setup the vehicle at the starting point
-        if self.route_waypoints:
-            start_wp, _ = self.route_waypoints[0]  # Assuming the first tuple contains the start waypoint
-            self.vehicle.set_transform(start_wp.transform)
-        
-        # Initialize route tracking variables
-        self.current_waypoint_index = 0
-        self.num_routes_completed += 1
-        self.vehicle.set_simulate_physics(True)  # Re-enable physics for the vehicle
-        self.distance_from_center_history = deque(maxlen=100)
 
     # Steps environment
     def step(self, action):
@@ -254,6 +326,10 @@ class CarlaEnv(gym.Env):
         self.observation = self.get_observation()
         if self.allow_spectator:
             self.viewer_image = self._get_viewer_image()
+            # self.observation_rgb = self._get_observation_rgb()
+            # self.observation_rgb_left = self._get_observation_rgb_left()
+            # self.observation_semantic = self._get_observation_semantic()
+            # self.observation_semantic_left = self._get_observation_rgb_left()
         # Update vehicle transform for new frame
         transform = self.vehicle.get_transform()
         # Update waypoint index
@@ -309,10 +385,10 @@ class CarlaEnv(gym.Env):
         # print(f"reward_base {reward_fn5(self)}")
         # print(f"reward_traffic {calculate_traffic_light_reward(self)}")
         # print(f"reward_waypoint {reward_fn_waypoints(self)}")
-        self.last_reward = self.reward_fn(self)
+        self.last_reward = self.compute_reward(self)
         self.total_reward += self.last_reward
         self.step_count += 1
-        
+
         # Render the environment if allowed
         if self.allow_render:
             self.render_events()
@@ -369,8 +445,19 @@ class CarlaEnv(gym.Env):
         ])
         if self.allow_spectator:
             # Blit image from spectator camera
-            self.viewer_image = self._draw_path(self.spectator_camera, self.viewer_image)
-            self.display.blit(pygame.surfarray.make_surface(self.viewer_image.swapaxes(0, 1)), (0, 0))
+
+            
+            #self.draw = self.draw_route(self.display_manager.sensor_list[0].surface, self.display_manager.sensor_list[0].world.get_transform(), self.route_waypoints, (self.spectator_width, self.spectator_height))
+            self.display_manager.render()
+            #self.topdown_camera.render(self.display_manager)
+            
+            #camera_transform= self.rgb_camera_center.get_sensor().get_transform()
+            # top_down_display_surface = self.display_manager.sensor_list[0].surface
+            # top_down_display_surface.blit(pygame.surfarray.make_surface(self.viewer_image.swapaxes(0, 1)), (0, 0))
+            # Draw the route on the pygame window
+            #draw_route(self.display_manager.display, self.route_waypoints, camera_transform, (self.display_manager.window_size[0], self.display_manager.window_size[1]))
+            
+            # Traffic light
             traffic_light_state = self._get_traffic_light_state()
             traffic_light_color = OFF_COLOR  # Default to 'Off' color
         
@@ -381,22 +468,67 @@ class CarlaEnv(gym.Env):
             elif traffic_light_state == 2:  # Green
                 traffic_light_color = GREEN
          # Position for the traffic light indicator on the screen
-            traffic_light_position = (self.display.get_width() - 600, 20)
-            pygame.draw.circle(self.display, traffic_light_color, traffic_light_position, 20)
+            traffic_light_position = (self.display_manager.window_size[0] - 1100, 550)
+            pygame.draw.circle(self.display_manager.display, traffic_light_color, traffic_light_position, 20)
+
         # Superimpose current observation into top-right corner
-        obs_h, obs_w = self.observation['camera'].shape[0], self.observation['camera'].shape[1]
-        semantic_position = (self.display.get_size()[0] - obs_w - 10, 10)
-        camera_position = (self.display.get_size()[0] - obs_w - 10, 100)
+            obs_h, obs_w = self.observation['semantic_camera'].shape[0], self.observation['semantic_camera'].shape[1]
+            
+            
+            # Blit semantic camera image
+            semantic_position_front = (self.display_manager.window_size[0] - int(4*obs_w), self.display_manager.window_size[1] - int(obs_h))
+            semantic_image_surface = pygame.surfarray.make_surface((self.observation['semantic_camera']).swapaxes(0, 1))
+            self.display_manager.display.blit(semantic_image_surface, semantic_position_front)
 
-        # Blit semantic camera image
-        semantic_image_surface = pygame.surfarray.make_surface((self.observation['semantic_camera']).swapaxes(0, 1))
-        self.display.blit(semantic_image_surface, semantic_position)
+            semantic_position_left = (self.display_manager.window_size[0] - int(5*obs_w), self.display_manager.window_size[1] - int(obs_h))
+            semantic_image_surface_left = pygame.surfarray.make_surface((self.observation['semantic_camera_left']).swapaxes(0, 1))
+            self.display_manager.display.blit(semantic_image_surface_left, semantic_position_left)
 
+            semantic_position_right = (self.display_manager.window_size[0] - int(3*obs_w), self.display_manager.window_size[1] - int(obs_h))
+            semantic_image_surface_right = pygame.surfarray.make_surface((self.observation['semantic_camera_right']).swapaxes(0, 1))
+            self.display_manager.display.blit(semantic_image_surface_right, semantic_position_right)
+
+            semantic_position_back = (self.display_manager.window_size[0] - int(2*obs_w), self.display_manager.window_size[1] - int(obs_h))
+            semantic_image_surface_back = pygame.surfarray.make_surface((self.observation['semantic_camera_back']).swapaxes(0, 1))
+            self.display_manager.display.blit(semantic_image_surface_back, semantic_position_back)
         # Blit RGB camera image
-        camera_image_surface = pygame.surfarray.make_surface((self.observation['camera']).swapaxes(0, 1))
-        self.display.blit(camera_image_surface, camera_position)
+            # camera_position_front = (self.display_manager.window_size[0] - int(2*obs_w) - 10, 300)
+            # camera_image_surface = pygame.surfarray.make_surface(self.observation['camera'].swapaxes(0, 1))
+            # self.display_manager.display.blit(camera_image_surface, camera_position_front)
+
+            # camera_position_left = (self.display_manager.window_size[0] - int(3*obs_w) - 10, 300)
+            # camera_image_surface_left = pygame.surfarray.make_surface(self.observation['camera_left'].swapaxes(0, 1))
+            # self.display_manager.display.blit(camera_image_surface_left, camera_position_left)
+
+            # camera_position_right = (self.display_manager.window_size[0] - int(obs_w) - 10, 300)
+            # camera_image_surface_right = pygame.surfarray.make_surface(self.observation['camera_right'].swapaxes(0, 1))
+            # self.display_manager.display.blit(camera_image_surface_right, camera_position_right)
+        #Blit BIV camera image
+            top_down_camera_position = (int(self.display_manager.window_size[0] - int(5*obs_w)), self.display_manager.window_size[1] - int(3.5*obs_h))
+            self.viewer_image1 = self._draw_path(self.spectator_sensor, self.viewer_image)
+            top_down_display_surface=(pygame.surfarray.make_surface(self.viewer_image1.swapaxes(0, 1)))
+            new_width = int(top_down_display_surface.get_width()*0.40)
+            new_height = int(top_down_display_surface.get_height()*0.45)
+            new_size = (new_width, new_height)
+            scaled_surface = pygame.transform.scale(top_down_display_surface, new_size)
+            #             # Example: Crop the central part of the scaled surface
+            crop_x = int(new_width * 0.15)  # Start cropping at 25% of the new width
+            crop_y = int(new_height * 0.00)  # Start cropping at 25% of the new height
+            crop_width = int(new_width * 0.69)  # Crop width is 50% of the new width
+            crop_height = int(new_height * 0.93)  # Crop height is 50% of the new height
+            crop_rect = pygame.Rect(crop_x, crop_y, crop_width, crop_height)
+
+            # Create a subsurface (this does not create a new copy, it references the scaled surface)
+            cropped_surface = scaled_surface.subsurface(crop_rect)
+            self.display_manager.display.blit(cropped_surface, top_down_camera_position)
+            ###
+            lidar_raw = self.get_lidar_observation()
+            lidar_surface = self.lidar_grid_to_surface(lidar_raw)
+            
+            self.display_manager.display.blit(lidar_surface, (self.display_manager.window_size[0] - int(obs_w), self.display_manager.window_size[1] - int(obs_h)))
         # Render HUD
-        self.hud.render(self.display, extra_info=self.extra_info)
+        #self.hud.render(self.display, extra_info=self.extra_info)
+        self.hud.render(self.display_manager.display, extra_info=self.extra_info)
         self.extra_info = []  # Reset extra info list
         # Render to screen
         pygame.display.flip()
@@ -465,19 +597,37 @@ class CarlaEnv(gym.Env):
         # What we collided with and what was the impulse
         if get_actor_display_name(event.other_actor) != "Road":
             self.terminate = True
-        if self.allow_render:
-            self.hud.notification("Collision with {}".format(get_actor_display_name(event.other_actor)))
+        # if self.allow_render:
+        #     self.hud.notification("Collision with {}".format(get_actor_display_name(event.other_actor)))
 
         #collision_impulse = math.sqrt(event.normal_impulse.x ** 2 + event.normal_impulse.y ** 2 + event.normal_impulse.z ** 2)
 
-        
     def _lane_invasion_data(self, event):
+        # Set of lane marking types considered as terminable conditions
+        terminable_lane_markings = {
+            carla.LaneMarkingType.Solid,
+            carla.LaneMarkingType.SolidSolid,
+            carla.LaneMarkingType.SolidBroken,
+            carla.LaneMarkingType.BrokenSolid,
+            # ... include any other lane types that should cause termination
+        }
 
-        self.terminate = True
-        lane_types = set(x.type for x in event.crossed_lane_markings)
-        text = ["%r" % str(x).split()[-1] for x in lane_types]
-        if self.allow_render:
-            self.hud.notification("Crossed line %s" % " and ".join(text))
+        # Determine the types of markings that were crossed
+        crossed_markings = set(x.type for x in event.crossed_lane_markings)
+
+        # Check if any of the crossed markings are considered terminable
+        should_terminate = any(mark_type in terminable_lane_markings for mark_type in crossed_markings)
+        
+        if should_terminate:
+            # Terminate if any of the crossed markings are terminable types
+            self.terminate = False
+        #     text = " and ".join([str(x).split('.')[-1] for x in crossed_markings if x in terminable_lane_markings])
+        #     if self.allow_render:
+        #         self.hud.notification(f"Crossed a terminable lane marking {text}")
+        # else:
+        #     # Otherwise, do not terminate
+        #     if self.allow_render:
+        #         self.hud.notification("Crossed a broken lane marking without termination")
 
     def _get_viewer_image(self):
         while self.viewer_image_buffer is None:
@@ -485,50 +635,111 @@ class CarlaEnv(gym.Env):
         image = self.viewer_image_buffer
         self.viewer_image_buffer = None
         return image
-
-    def _get_start_transform(self):
-        return random.choice(self.map.get_spawn_points())  
-
+    def _get_observation_rgb(self):
+        while self.observation_buffer_rgb is None:
+            pass
+        image = self.observation_buffer_rgb
+        self.observation_buffer_rgb = None
+        return image
+    # def _get_observation_rgb_left(self):
+    #     while self.observation_buffer_rgb_left is None:
+    #         pass
+    #     image = self.observation_buffer_rgb_left
+    #     self.observation_buffer_rgb_left = None
+    #     return image
+    # def _get_observation_rgb_right(self):
+    #     while self.observation_buffer_rgb_right is None:
+    #         pass
+    #     image = self.observation_buffer_rgb_right
+    #     self.observation_buffer_rgb_right = None
+    #     return image
+    def _get_observation_semantic(self):
+        while self.observation_buffer_semantic is None:
+            pass
+        image = self.observation_buffer_semantic
+        self.observation_buffer_semantic = None
+        return image
+    def _get_observation_semantic_left(self):
+        while self.observation_buffer_semantic_left is None:
+            pass
+        image = self.observation_buffer_semantic_left
+        self.observation_buffer_semantic_left = None
+        return image
+    def _get_observation_semantic_right(self):
+        while self.observation_buffer_semantic_right is None:
+            pass
+        image = self.observation_buffer_semantic_right
+        self.observation_buffer_semantic_right = None
+        return image
+    def _get_observation_semantic_back(self):
+        while self.observation_buffer_semantic_back is None:
+            pass
+        image = self.observation_buffer_semantic_back
+        self.observation_buffer_semantic_back = None
+        return image
+        
     def _set_observation_image(self, image):
         self.observation_buffer = image
 
-    def _set_observation_rgb(self, image):
-        self.observation_buffer_rgb = image
+    # def _set_observation_rgb(self, image):
+    #     self.observation_buffer_rgb = image
+
+    # def _set_observation_rgb_left(self, image):
+    #     self.observation_buffer_rgb_left = image
+
+    # def _set_observation_rgb_right(self, image):
+    #     self.observation_buffer_rgb_right = image
+
     def _set_observation_semantic(self, image):
         self.observation_buffer_semantic = image
+
+    def _set_observation_semantic_left(self, image):
+        self.observation_buffer_semantic_left = image
+
+    def _set_observation_semantic_right(self, image):
+        self.observation_buffer_semantic_right = image
+
+    def _set_observation_semantic_back(self, image):
+        self.observation_buffer_semantic_back = image
 
     def _set_viewer_image(self, image):
         self.viewer_image_buffer = image
 
     def _draw_path(self, camera, image):
-        """
-            Draw a connected path from start of route to end using homography.
-        """
-        vehicle_vector = vector(self.vehicle.get_transform().location)
-        # Get the world to camera matrix
-        world_2_camera = np.array(image.transform.get_inverse_matrix())
+        """Draw a connected path from start of route to end using homography."""
+        try:
+            vehicle_vector = vector(self.vehicle.get_transform().location)
+            world_2_camera = np.array(camera.get_transform().get_inverse_matrix())
 
-        # Get the attributes from the camera
-        image_w = int(image.height)
-        image_h = int(image.width)
-        fov = float(image.fov)
+            image_w = int(camera.attributes['image_size_x'])
+            image_h = int(camera.attributes['image_size_y'])
+            fov = float(camera.attributes['fov'])
 
-        image = self.get_rgb_image(image)
+            # Convert CARLA image to a numpy array
+            np_image = self.get_rgb_image(image)
 
-        for i in range(self.current_waypoint_index, len(self.route_waypoints)):
-            waypoint_location = self.route_waypoints[i][0].transform.location + carla.Location(z=1.25)
-            waypoint_vector = vector(waypoint_location)
-            if not (2 < abs(np.linalg.norm(vehicle_vector - waypoint_vector)) < 50):
-                continue
-            # Calculate the camera projection matrix to project from 3D -> 2D
-            K = build_projection_matrix(image_h, image_w, fov)
-            x, y = get_image_point(waypoint_location, K, world_2_camera)
-            if i == len(self.route_waypoints) - 1:
-                color = (255, 0, 0)
-            else:
-                color = (0, 0, 255)
-            image = cv2.circle(image, (x, y), radius=3, color=color, thickness=-1)
-        return image    
+            for i, waypoint in enumerate(self.route_waypoints[self.current_waypoint_index:]):
+                waypoint_location = waypoint[0].transform.location + carla.Location(z=1.25)
+                waypoint_vector = vector(waypoint_location)
+                if not (2 < np.linalg.norm(vehicle_vector - waypoint_vector) < 50):
+                    continue
+
+                K = build_projection_matrix(image_w, image_h, fov)
+                x, y = get_image_point(waypoint_location, K, world_2_camera)
+
+                # Validate if the point is within the image boundary before drawing
+                if 0 <= x < image_w and 0 <= y < image_h:
+                    color = (255, 0, 0) if i == len(self.route_waypoints) - 1 else (0, 0, 255)
+                    np_image = cv2.circle(np_image, (int(x), int(y)), radius=3, color=color, thickness=-1)
+                else:
+                    None #print(f"Point out of bounds: (x: {x}, y: {y})")
+
+        except Exception as e:
+            print("Error in _draw_path:", str(e))
+
+        return np_image
+
+
 
     def _get_speed(self):
         # Assuming 'self.vehicle' is your carla.VehicleActor instance
@@ -630,45 +841,211 @@ class CarlaEnv(gym.Env):
             print(f"Closest Traffic Light ID: {closest_light.id} at distance {min_distance}")
         else:
             print("No nearby traffic lights found within the search radius.")
+    
+    def handle_lidar_data(self, lidar_data):
+        self.lidar_points = np.frombuffer(lidar_data.raw_data, dtype=np.dtype('f4')).reshape(-1, 4)[:, :3]  # Extracting x, y, z
+        # print("Lidar points captured:", self.lidar_points.shape)  # Debugging line
+
+    def get_lidar_observation(self):
+        if not hasattr(self, 'lidar_points') or self.lidar_points.size == 0:
+            print("No LiDAR data available.")
+            return np.zeros((100, 100))  # Return an empty grid if no data
+
+        grid_size = 100
+        lidar_range = 50
+        grid = np.zeros((grid_size, grid_size))
+
+        scale = grid_size / (2 * lidar_range)
+        for point in self.lidar_points:
+            x, y, _ = point
+            if -lidar_range <= x <= lidar_range and -lidar_range <= y <= lidar_range:
+                grid_x = int((x + lidar_range) * scale)
+                grid_y = int((y + lidar_range) * scale)
+                if 0 <= grid_x < grid_size and 0 <= grid_y < grid_size:
+                    grid[grid_x, grid_y] += 1
+                else:
+                    print("Point out of grid bounds:", x, y, grid_x, grid_y)
+
+        grid /= grid.max() if grid.max() != 0 else 1  # Avoid division by zero
+        #print("LiDAR grid generated with max value:", grid.max())
+        return grid
+
+    def lidar_grid_to_surface(self, grid):
+        # Normalize the grid to the range [0, 255]
+        normalized_grid = (grid / grid.max() * 255).astype(np.uint8)
+        
+        # Stack the grid three times to create an RGB image
+        rgb_grid = np.stack([normalized_grid]*3, axis=-1)
+        
+        # Create a Pygame surface from the RGB data
+        unscaled_surface = pygame.surfarray.make_surface(rgb_grid)
+
+        # Define the new size
+        new_size = (196, 100)  # width=196, height=100
+
+        # Scale the surface to the new size
+        scaled_surface = pygame.transform.scale(unscaled_surface, new_size)
+
+        return scaled_surface
+
+    def get_yaw_rate(self):
+        angular_velocity = self.vehicle.get_angular_velocity()
+        return angular_velocity.z  # Assuming z is the yaw axis in your vehicle model
+
+    def get_roll_pitch(self):
+        rotation = self.vehicle.get_transform().rotation
+        return rotation.roll, rotation.pitch
+    def _get_achieved_goal(self):
+        if self.current_waypoint_index > 0:
+            loc = self.route_waypoints[self.current_waypoint_index - 1][0].transform.location
+            #print(loc)
+            return np.array([loc.x, loc.y, loc.z], dtype=np.float32)
+        loc = self.route_waypoints[0][0].transform.location
+        return np.array([loc.x, loc.y, loc.z], dtype=np.float32)
+
+    def _get_desired_goal(self):
+        loc = self.route_waypoints[-1][0].transform.location
+        #print(loc)
+        return np.array([loc.x, loc.y, loc.z], dtype=np.float32)
+
     def get_observation(self):
         # Wait for the observation buffer to be filled
-        while self.observation_buffer_rgb is None:
+        while self.observation_buffer_semantic is None or self.observation_buffer_semantic_left is None or self.observation_buffer_semantic_right is None or self.observation_buffer_semantic_back is None:
             time.sleep(0.01)  # Sleep to prevent CPU spinning, replace with more appropriate waiting mechanism if available
-        while self.observation_buffer_semantic is None:
-            time.sleep(0.01) 
+        # while self.observation_buffer_rgb_left is None:
+        #     time.sleep(0.01)
+        # while self.observation_buffer_rgb_right is None:
+        #     time.sleep(0.01)
         # Retrieve and reset the buffer
-        raw_image = self.observation_buffer_rgb
-        self.observation_buffer_rgb = None
+        # raw_image = self.observation_buffer_rgb
+        # self.observation_buffer_rgb = None
+
+        # raw_image_left = self.observation_buffer_rgb_left
+        # self.observation_buffer_rgb_left = None
+
+        # raw_image_right = self.observation_buffer_rgb_right
+        # self.observation_buffer_rgb_right = None
 
         raw_semantic =self.observation_buffer_semantic
         self.observation_buffer_semantic = None
 
+        raw_semantic_left = self.observation_buffer_semantic_left
+        self.observation_buffer_semantic_left = None
+
+        raw_semantic_right = self.observation_buffer_semantic_right
+        self.observation_buffer_semantic_right = None
+
+        raw_semantic_back = self.observation_buffer_semantic_back
+        self.observation_buffer_semantic_back = None
+        # print(raw_image)
+        # print(raw_image_left)
+        # print(raw_image_right)
 
 
         # Process the raw image to a format suitable for the model (e.g., numpy array)
-        processed_image = self.process_image(raw_image)  # Adjust this method to fit your image processing needs
-        semantic_image = self.get_semantic_image(raw_semantic)  # Get semantic image from processed image
-
+        # processed_image = self.process_image(raw_image)
+        # processed_image_left = self.process_image(raw_image_left)
+        # processed_image_right = self.process_image(raw_image_right)
+        semantic_image = self.get_semantic_image(raw_semantic)
+        semantic_image_left = self.get_semantic_image(raw_semantic_left)
+        semantic_image_right = self.get_semantic_image(raw_semantic_right)
+        semantic_image_back = self.get_semantic_image(raw_semantic_back)
         # Collect all additional sensor data
+        lidar_obs = self.get_lidar_observation().flatten()
         speed = self._get_speed()
         acceleration = self._get_acceleration()
         distance_to_center = self._get_distance_to_center()
         angle_difference = self._get_angle_difference()
         traffic_light_state = self._get_traffic_light_state()
-
+        yaw_rate = self.get_yaw_rate()
+        roll, pitch = self.get_roll_pitch()
+        achieved_goal = self._get_achieved_goal()
+        desired_goal = self._get_desired_goal()
         # Package into a dictionary matching the defined observation_space
         observation = {
-            'camera': processed_image,
+            # 'camera': processed_image,
+            # 'camera_left': processed_image_left,
+            # 'camera_right': processed_image_right,
             'semantic_camera': semantic_image,
+            'semantic_camera_left': semantic_image_left,
+            'semantic_camera_right': semantic_image_right,
+            'semantic_camera_back': semantic_image_back,
+            'lidar_space': lidar_obs,
             'speed': np.array([speed], dtype=np.float32),
             'acceleration': np.array([acceleration], dtype=np.float32),
             'distance_to_center': np.array([distance_to_center], dtype=np.float32),
             'angle_difference': np.array([angle_difference], dtype=np.float32),
-            "traffic_light_state": traffic_light_state
+            "traffic_light_state": traffic_light_state,
+            "yaw_rate": np.array([yaw_rate], dtype=np.float32),
+            "roll": np.array([roll], dtype=np.float32),
+            "pitch": np.array([pitch], dtype=np.float32),
+            'achieved_goal' : achieved_goal,
+            'desired_goal' : desired_goal
         }
-
         return observation
-    
+
+
+    def setup_agent(self, vehicle, route):
+        # BasicAgent or similar can be used, or directly manipulate with Traffic Manager
+        agent = BasicAgent(vehicle)
+        agent.set_global_plan(route)  # Convert locations to waypoints if necessary
+        vehicle.set_autopilot(True)
+        # Traffic manager settings if required
+        self.traffic_manager.ignore_lights_percentage(vehicle, 0)  # Fully obey traffic lights
+
+    def _get_start_transform(self, offset=0):
+        """
+        Get a starting transform at a random spawn point.
+        Optionally, add an offset to spawn another vehicle ahead or behind the selected spawn point.
+        """
+        base_transform = random.choice(self.map.get_spawn_points())
+        if offset != 0:
+            # Calculate the forward direction from the transform rotation
+            forward_vector = carla.Location(x=math.cos(math.radians(base_transform.rotation.yaw)),
+                                            y=math.sin(math.radians(base_transform.rotation.yaw)))
+            # Scale the forward vector by the offset and add to the base location
+            offset_location = carla.Location(forward_vector.x * offset, forward_vector.y * offset, 0)
+            # Create a new transform with the offset
+            new_location = carla.Location(base_transform.location.x + offset_location.x,
+                                        base_transform.location.y + offset_location.y,
+                                        base_transform.location.z)
+            return carla.Transform(new_location, base_transform.rotation)
+        return base_transform   
+
+    def initialize_traffic_manager(self):
+        self.traffic_manager = self.client.get_trafficmanager()
+        self.traffic_manager.set_synchronous_mode(True)
+        self.traffic_manager.set_random_device_seed(0)
+        
+    def spawn_and_assign_routes(self, vehicle_spawn_indices, route_indices):
+        blueprints = self.world.get_blueprint_library().filter('vehicle.*')
+        spawn_points = self.world.get_map().get_spawn_points()
+        route = self.define_route_by_indices(route_indices)
+        vehicles = []
+
+        for index in vehicle_spawn_indices:
+            blueprint = random.choice(blueprints)
+            spawn_point = spawn_points[index]
+            vehicle = self.world.try_spawn_actor(blueprint, spawn_point)
+            if vehicle:
+                vehicle.set_autopilot(True)
+                self.traffic_manager.vehicle_percentage_speed_difference(vehicle, -100)  # Slower by 30%
+                self.traffic_manager.set_path(vehicle, route)
+                vehicles.append(vehicle)
+        return vehicles
+    def define_route_by_indices(self, indices):
+        spawn_points = self.world.get_map().get_spawn_points()
+        route = [spawn_points[index].location for index in indices]
+        return route
+
+    def cleanup(self):
+        for vehicle in self.spawned_vehicles:
+            if vehicle.is_alive:
+                vehicle.destroy()
+        self.spawned_vehicles = []
+
+
+
     print("finished")      
     
         

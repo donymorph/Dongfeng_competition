@@ -1,6 +1,5 @@
 import numpy as np
 from config import CONFIG
-
 low_speed_timer = 0
 
 min_speed = CONFIG["reward_params"]["min_speed"]
@@ -22,7 +21,7 @@ def create_reward_fn(reward_fn):
             global low_speed_timer
             low_speed_timer += 1.0 / env.fps
             speed = env.get_vehicle_lon_speed()
-            if low_speed_timer > 5.0 and speed < 1.0 and env.current_waypoint_index >= 0:
+            if low_speed_timer > 10.0 and speed < 1.0 and env.current_waypoint_index >= 0:
                 env.terminate = True
                 terminal_reason = "Vehicle stopped"
 
@@ -33,7 +32,7 @@ def create_reward_fn(reward_fn):
 
             # Stop if speed is too high
             if max_speed > 0 and speed > max_speed:
-                env.terminate = True
+                env.terminate = False
                 terminal_reason = "Too fast"
 
         # Calculate reward
@@ -85,7 +84,7 @@ def reward_fn5(env):
     reward = speed_reward * centering_factor * angle_factor * distance_std_factor
     return reward
 
-reward_functions["reward_fn5"] = create_reward_fn(reward_fn5)
+#reward_functions["reward_fn5"] = create_reward_fn(reward_fn5)
 
 def reward_fn_waypoints(env):
     """Reward based on waypoint traversal and speed conditions."""
@@ -94,10 +93,10 @@ def reward_fn_waypoints(env):
     speed_reward = calculate_speed_reward(speed_kmh)
 
     centering_factor = max(1.0 - env.distance_from_center / max_distance, 0.0)
-    reward = (env.current_waypoint_index - env.prev_waypoint_index) + speed_reward * centering_factor
+    reward = ((env.current_waypoint_index - env.prev_waypoint_index) + speed_reward * centering_factor)*2
     return reward
 
-reward_functions["reward_fn_waypoints"] = create_reward_fn(reward_fn_waypoints)
+#reward_functions["reward_fn_waypoints"] = create_reward_fn(reward_fn_waypoints)
 def calculate_traffic_light_reward(env):
     light_state = env._get_traffic_light_state()
     speed = env.get_vehicle_lon_speed()
@@ -119,8 +118,32 @@ def reward_fn_traffic_aware(env):
     reward = base_reward + traffic_light_reward
     return reward
 
-reward_functions["reward_fn_traffic_aware"] = create_reward_fn(reward_fn_traffic_aware)
+#reward_functions["reward_fn_traffic_aware"] = create_reward_fn(reward_fn_traffic_aware)
 
+def calculate_goal_distance_reward(env):
+    """
+    Compute the reward based on the distance between the achieved goal
+    and the desired goal. The closer the vehicle is to the desired goal,
+    the higher the reward.
+    """
+    # Extract achieved and desired goals from the environment
+    achieved_goal = env._get_achieved_goal()  # Should return np.array([x, y, z])
+    desired_goal = env._get_desired_goal()    # Should return np.array([x, y, z])
+
+    # Calculate the Euclidean distance between achieved and desired goals
+    distance = np.linalg.norm(achieved_goal - desired_goal)
+    #print(f"distance: {distance}")
+    # Define the reward: inverse of distance or negative distance
+    # You might want to scale the reward by a factor or add an exponential decay to shape it
+    reward = -distance/100  # Simple negative distance to make closer more positive
+
+    # Optionally, normalize or scale the reward by a constant factor if needed
+    # reward = -distance / 100  # Example normalization
+    #print(f"reward for distance:{reward}")
+    return reward
+
+# Wrap the reward function using the create_reward_fn to handle termination checks and resets
+#reward_functions["goal_distance_reward"] = create_reward_fn(calculate_goal_distance_reward)
 def combined_reward_function(env):
     """
     Combined reward function that integrates rewards based on:
@@ -137,8 +160,10 @@ def combined_reward_function(env):
     # Calculate the reward for navigating waypoints effectively
     waypoint_navigation_reward = reward_fn_waypoints(env)
     #print(f"waypoint reward: {waypoint_navigation_reward}")
+    distance_reward = calculate_goal_distance_reward(env)
+    #print(distance_reward)
     # Sum up all the rewards and penalties
-    total_reward = base_driving_reward + traffic_light_reward + waypoint_navigation_reward
+    total_reward = base_driving_reward + traffic_light_reward + waypoint_navigation_reward + distance_reward
 
     return total_reward
 

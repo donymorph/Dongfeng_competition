@@ -1,9 +1,9 @@
 import carla
-
+import pygame
 import numpy as np
 import weakref
 import xml.etree.ElementTree as ET
-
+import math
 
 def get_actor_display_name(actor, truncate=250):
     name = " ".join(actor.type_id.replace("_", ".").title().split(".")[1:])
@@ -57,8 +57,6 @@ def vector(v):
     elif isinstance(v, carla.Rotation):
         return np.array([v.pitch, v.yaw, v.roll])
 
-
-
 # load routes from xml file 
 def load_route_from_xmlold(xml_file_path, route_id):
     tree = ET.parse(xml_file_path)
@@ -105,3 +103,46 @@ def get_all_route_ids(xml_file_path):
     root = tree.getroot()
     route_ids = [route.get('id') for route in root.findall('.//route')]
     return route_ids
+
+
+def world_to_screen(world_location, camera_transform, display_dimensions):
+    # Convert the 3D world location to 2D screen location considering the camera transform
+
+    # Compute the relative location (from camera perspective)
+    relative_location = world_location - camera_transform.location
+    relative_location = carla.Location(
+        relative_location.x * math.cos(math.radians(camera_transform.rotation.yaw)) + relative_location.y * math.sin(math.radians(camera_transform.rotation.yaw)),
+        -relative_location.x * math.sin(math.radians(camera_transform.rotation.yaw)) + relative_location.y * math.cos(math.radians(camera_transform.rotation.yaw)),
+        relative_location.z
+    )
+
+    # Perspective projection parameters (assuming orthographic projection)
+    scale = display_dimensions[1] / (2.0 * camera_transform.location.z * math.tan(math.radians(90 / 2.0)))
+
+    # Convert to screen coordinates
+    screen_x = display_dimensions[0] / 2 + scale * relative_location.x
+    screen_y = display_dimensions[1] / 2 - scale * relative_location.y
+
+    return int(screen_x), int(screen_y)
+
+
+def draw_route(display, waypoints, camera_transform, display_dimensions):
+    if len(waypoints) < 2:
+        return  # Need at least two waypoints to draw a route
+
+    # Waypoints color and thickness
+    color = (255, 255, 0)  # Yellow
+    thickness = 2
+
+    # Loop through the waypoints
+    for i in range(len(waypoints) - 1):
+        waypoint_location = waypoints[i][0].transform.location
+        next_waypoint_location = waypoints[i + 1][0].transform.location
+
+        # Convert world locations to screen locations
+        screen_x, screen_y = world_to_screen(waypoint_location, camera_transform, display_dimensions)
+        next_screen_x, next_screen_y = world_to_screen(next_waypoint_location, camera_transform, display_dimensions)
+
+        # Draw a line segment between the current waypoint and the next
+        pygame.draw.line(display, color, (screen_x, screen_y), (next_screen_x, next_screen_y), thickness)
+

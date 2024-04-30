@@ -38,17 +38,17 @@ algorithm_params = {
         policy_kwargs=dict(net_arch=[400, 300]),
     ),
     "SAC_BEST": dict(
-        learning_rate=lr_schedule(1e-4, 5e-7, 2),
-        buffer_size=300000,
-        batch_size=256,
+        learning_rate=lr_schedule(5e-7, 3e-4, 1e-3),
+        buffer_size=600000,
+        batch_size=1024,
         ent_coef='auto',
-        gamma=0.98,
-        tau=0.02,
+        gamma=0.99,
+        tau=0.01,
         train_freq=64,
         gradient_steps=64,
         learning_starts=10000,
         use_sde=True,
-        policy_kwargs=dict(log_std_init=-3, net_arch=[500, 300], use_sde =True),
+        policy_kwargs=dict(log_std_init=-3, net_arch=[512, 512, 512], use_sde =True),
     ),
 }
 
@@ -86,24 +86,24 @@ reward_params = {
     "combined_reward": dict(
         early_stop=True,
         min_speed=5.0,  # km/h
-        max_speed=15.0,  # km/h 
-        target_speed=10.0,  # kmh
-        max_distance=2.0,  # Max distance from center before terminating
+        max_speed=10.0,  # km/h 
+        target_speed=7.0,  # kmh
+        max_distance=5.0,  # Max distance from center before terminating
         max_std_center_lane=0.35,
         max_angle_center_lane=90,
-        penalty_reward=-10,
+        penalty_reward=-100,
     ),
 }
 
 _CONFIG_1 = {
-    "algorithm": "SAC",
-    "algorithm_params": algorithm_params["SAC_BEST"],
-    "action_smoothing": 0.75,
+    "algorithm": "PPO",
+    "algorithm_params": algorithm_params["PPO"],
+    "action_smoothing": 0.00,
     "reward_fn": "combined_reward",
     "reward_params": reward_params["combined_reward"],
     "obs_sensor_rgb": "rgb",
     "obs_sensor_semantic": "semantic",
-    "obs_res": (160, 80),
+    "obs_res": (196, 100),
 }
 CONFIGS = {
     "1": _CONFIG_1

@@ -1,5 +1,30 @@
 import warnings
 import os
+import subprocess
+import time
+# First, find all processes that are using the specific port
+command = "lsof -i :2000 -t"
+try:
+    processes = subprocess.check_output(command, shell=True).decode().strip().split('\n')
+except subprocess.CalledProcessError as e:
+    # Handle the case where no processes are found or another error occurs
+    print("No processes found using port 2000, or an error occurred.")
+    processes = []
+print(processes)
+
+# Now identify which process is not the CARLA server
+# For this, you could check the command that started the process, for example:
+for pid in processes:
+    try:
+        # Retrieve the command of the process
+        pid_cmd = subprocess.check_output(f"ps -p {pid} -o command=", shell=True).decode().strip()
+        # Decide whether to kill based on the command
+        if 'CarlaUE4' not in pid_cmd:
+            print(f"Killing non-CARLA python process with PID: {pid}")
+            subprocess.check_output(f"kill -9 {pid}", shell=True)
+    except Exception as e:
+        print(f"Failed to check or kill process {pid}: {e}")
+# Start CARLA Server
 
 warnings.filterwarnings("ignore")
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
@@ -28,13 +53,13 @@ from config import CONFIG
 
 # Setup environment
 env = CarlaEnv(host=args["host"], port=args["port"], town=args["town"],
-                fps=args["fps"], obs_sensor=CONFIG["obs_sensor"], obs_res=CONFIG["obs_res"], 
+                fps=args["fps"], obs_sensor_semantic=CONFIG["obs_sensor_semantic"], obs_sensor_rgb=CONFIG["obs_sensor_rgb"], obs_res=CONFIG["obs_res"], 
                 reward_fn=reward_functions[CONFIG["reward_fn"]],
-                view_res=(1120, 560), action_smoothing=CONFIG["action_smoothing"],
+                view_res=(1200, 600), action_smoothing=CONFIG["action_smoothing"],
                 allow_spectator=True, allow_render=not args["no_render"])
 
 # Load the model
-model = SAC.load(args["reload_model"], env=env)
+model = PPO.load(args["reload_model"], env=env)
 
 # Evaluate the model
 episode_rewards = []

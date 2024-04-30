@@ -11,10 +11,11 @@ It can also make use of the global route planner to follow a specifed route
 
 import carla
 from shapely.geometry import Polygon
-
+from enum import IntEnum
+from collections import deque
 from navigation.local_planner import LocalPlanner, RoadOption
 from navigation.global_route_planner import GlobalRoutePlanner
-from tools.misc import (get_speed, is_within_distance,
+from tools.misc import (get_speed, is_within_distance, draw_waypoints,
                                get_trafficlight_trigger_location,
                                compute_distance)
 
@@ -63,7 +64,8 @@ class BasicAgent(object):
         self._speed_ratio = 1
         self._max_brake = 0.5
         self._offset = 0
-
+        self.target_waypoint = None
+        self._waypoints_queue = deque(maxlen=10000)
         # Change parameters according to the dictionary
         opt_dict['target_speed'] = target_speed
         if 'ignore_traffic_lights' in opt_dict:
@@ -101,7 +103,9 @@ class BasicAgent(object):
         # Get the static elements of the scene
         self._lights_list = self._world.get_actors().filter("*traffic_light*")
         self._lights_map = {}  # Dictionary mapping a traffic light to a wp corrspoing to its trigger volume location
-
+        current_waypoint = self._map.get_waypoint(self._vehicle.get_location())
+        self.target_waypoint, self.target_road_option = (current_waypoint, RoadOption.LANEFOLLOW)
+        self._waypoints_queue.append((self.target_waypoint, self.target_road_option))
     def add_emergency_stop(self, control):
         """
         Overwrites the throttle a brake values of a control to perform an emergency stop.
@@ -186,7 +190,7 @@ class BasicAgent(object):
         end_location = end_waypoint.transform.location
         return self._global_planner.trace_route(start_location, end_location)
 
-    def run_step(self):
+    def run_step(self, debug=True):
         """Execute one step of navigation."""
         hazard_detected = False
 
@@ -207,10 +211,11 @@ class BasicAgent(object):
         if affected_by_tlight:
             hazard_detected = True
 
-        control = self._local_planner.run_step()
+        control = self._local_planner.run_step(debug=True)
         if hazard_detected:
             control = self.add_emergency_stop(control)
-
+        if debug:
+            draw_waypoints(self._vehicle.get_world(), [self.target_waypoint], 1.0)
         return control
 
     def done(self):
